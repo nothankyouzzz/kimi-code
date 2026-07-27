@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+# upgrade-with-patches.sh — rebuild kimi from an upstream release with local
+# patch branches applied, then atomically swap it into ~/.kimi-code/bin/kimi.
+#
+# This file is the source of truth, managed in the repo (local/upgrade-hook
+# branch, pushed to the fork). The live copy used by the upgrade hook is
+# ~/.kimi-code/upgrade-with-patches.sh — install/update it with install.sh.
+#
+# Invoked by the local `kimi upgrade` delegation hook (target version as $1),
+# or run directly. Idempotent: exits without rebuilding when the recorded
+# state already matches the target release AND the patch fingerprint (active
+# branches + their head commits) — a new or updated patch forces a rebuild
+# even when the release is unchanged.
+#
+# Env overrides:
+#   KIMI_PATCH_REPO   repo working tree (default ~/workspace/kimi-code)
+#   KIMI_PATCH_STATE  registry/state file (default ~/.kimi-code/local-patches.json)
+#   DRY_RUN=1         stop before the build step, print the plan only
+#   FORCE=1           rebuild even when state matches the target release
+set -euo pipefail
+
+REPO="${KIMI_PATCH_REPO:-$HOME/workspace/kimi-code}"
+STATE_FILE="${KIMI_PATCH_STATE:-$HOME/.kimi-code/local-patches.json}"
+BIN_DIR="$HOME/.kimi-code/bin"
+UPSTREAM_REPO="MoonshotAI/kimi-code"
+TAG_PREFIX="@moonshot-ai/kimi-code@"
+
+log() { printf '[kimi-patched-upgrade] %s\n' "$*"; }
+die() { printf '[kimi-patched-upgrade] ERROR: %s\n' "$*" >&2; exit 1; }
+
+[ -d "$REPO/.git" ] || die "repo not found at $REPO (set KIMI_PATCH_REPO)"
+[ -f "$STATE_FILE" ] || die "registry not found at $STATE_FILE"
+command -v gh >/dev/null || die "gh CLI is required"
+command -v jq >/dev/null || die "jq is required"
+command -v git >/dev/null || die "git is required"
+command -v pnpm >/dev/null || die "pnpm is required"
+command -v node >/dev/null || die "node is required"
+
+# The SEA build needs the repo-pinned Node; a build without SEA support (e.g.
+# the linuxbrew one) only fails late with an opaque "Single executable
+# application is disabled". Compare against .nvmrc up front instead.
+if [ -f "$REPO/.nvmrc" ]; then
+  WANT_NODE=$(tr -d 'v[:space:]' < "$REPO/.nvmrc")
+  HAVE_NODE=$(node --version | tr -d 'v[:space:]')
+  if [ "$HAVE_NODE" != "$WANT_NODE" ]; then
+    die "node $WANT_NODE required (per $REPO/.nvmrc) but 'node' is $HAVE_NODE ($(command -v node)) — fix PATH (e.g. open a fresh shell so nvm loads) and rerun"
+  fi
+fi
+
+cd "$REPO"
+[ -z "$(git status --porcelain)" ] || die "repo working tree is dirty; commit or stash first"
+
+# --- 1. resolve target version ---------------------------------------------
+TARGET_VERSION="${1:-}"
+if [ -z "$TARGET_VERSION" ]; then
+  TARGET_VERSION=$(HTTPS_PROXY= HTTP_PROXY= https_proxy= http_proxy= \
+    gh release view -R "$UPSTREAM_REPO" --json tagName -q '.tagName' | sed "s|^${TAG_PREFIX}||")
+fi
+[[ "$TARGET_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "bad target version: '$TARGET_VERSION'"
+TAG="${TAG_PREFIX}${TARGET_VERSION}"
+
+# Fingerprint of the effective patch inputs: the target release plus, for each
+# active patch, the branch name and the commit sha that would be applied
+# (extras pulled in by git cherry are ancestors of the branch head, so the
+# head sha pins them too). The idempotency check below must compare this — a
+# new/changed patch with an unchanged release is still a different build.
+PATCH_COUNT=$(jq '.patches | length' "$STATE_FILE")
+FINGERPRINT_INPUT="$TARGET_VERSION"
+for i in $(seq 0 $((PATCH_COUNT - 1))); do
+  F_BRANCH=$(jq -r ".patches[$i].branch" "$STATE_FILE")
+  F_STATUS=$(jq -r ".patches[$i].status" "$STATE_FILE")
+  [ "$F_STATUS" = "active" ] || continue
+  F_SHA=$(git rev-parse --verify --quiet "refs/heads/$F_BRANCH" \
+    || git rev-parse --verify --quiet "refs/remotes/origin/$F_BRANCH" \
+    || echo "missing")
+  FINGERPRINT_INPUT+=$'\n'"$F_BRANCH@$F_SHA"
+done
+PATCHES_HASH=$(printf '%s' "$FINGERPRINT_INPUT" | sha256sum | awk '{print $1}')
+
+CURRENT_BASE=$(jq -r '.state.baseRelease // empty' "$STATE_FILE")
+CURRENT_PATCHES_HASH=$(jq -r '.state.patchesHash // empty' "$STATE_FILE")
+if [ "$CURRENT_BASE" = "$TARGET_VERSION" ] && [ "$CURRENT_PATCHES_HASH" = "$PATCHES_HASH" ] && [ "${FORCE:-0}" != "1" ]; then
+  log "already at $TARGET_VERSION with patches applied — nothing to do"
+  exit 0
+fi
+log "target release: $TARGET_VERSION (current base: ${CURRENT_BASE:-none})"
+
+# --- 2. fetch the release tag and check out a build branch ------------------
+git fetch upstream main --quiet
+if ! git rev-parse --verify "refs/tags/${TAG}^{commit}" >/dev/null 2>&1; then
+  log "fetching tag $TAG"
+  git fetch upstream "refs/tags/${TAG}:refs/tags/${TAG}" --quiet
+fi
+RELEASE_COMMIT=$(git rev-parse "refs/tags/${TAG}^{}")
+log "release commit: $RELEASE_COMMIT"
+
+PREV_REF=$(git symbolic-ref --short -q HEAD || git rev-parse HEAD)
+restore_ref() { git checkout --quiet "$PREV_REF" 2>/dev/null || true; }
+trap restore_ref EXIT
+
+git checkout --quiet -B local/patched "$RELEASE_COMMIT"
+
+# --- 3. apply patches --------------------------------------------------------
+APPLIED=()
+SKIPPED=()
+# Upstream context commits (between the release tag and a patch branch's base)
+# repeat across every patch branch with the SAME sha. Re-picking one is not
+# harmless: the 3-way merge can leave a partial residual (not an empty pick),
+# which then conflicts with later patches or re-applies add/delete pairs.
+# Dedup them by sha across the whole run.
+declare -A PICKED_SHAS=()
+for i in $(seq 0 $((PATCH_COUNT - 1))); do
+  BRANCH=$(jq -r ".patches[$i].branch" "$STATE_FILE")
+  PR=$(jq -r ".patches[$i].pr" "$STATE_FILE")
+  STATUS=$(jq -r ".patches[$i].status" "$STATE_FILE")
+  [ "$STATUS" = "active" ] || { SKIPPED+=("$BRANCH ($STATUS)"); continue; }
+
+  # Merged-PR detection: upstream already carries the change.
+  if [ "$PR" != "null" ]; then
+    PR_STATE=$(HTTPS_PROXY= HTTP_PROXY= https_proxy= http_proxy= \
+      gh pr view "$PR" -R "$UPSTREAM_REPO" --json state -q '.state' 2>/dev/null || echo "UNKNOWN")
+    if [ "$PR_STATE" = "MERGED" ]; then
+      log "patch $BRANCH: PR #$PR is merged — marking merged, skipping"
+      TMP=$(mktemp)
+      jq ".patches[$i].status = \"merged\"" "$STATE_FILE" > "$TMP" && mv "$TMP" "$STATE_FILE"
+      SKIPPED+=("$BRANCH (PR #$PR merged)")
+      continue
+    fi
+  fi
+
+  # Prefer the local branch (local-only patches never leave the machine);
+  # otherwise fetch the branch from origin.
+  if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    REF="$BRANCH"
+  else
+    git fetch origin "$BRANCH" --quiet
+    REF="origin/$BRANCH"
+  fi
+  # Every commit the branch carries that the release does not (patch-id
+  # comparison, so upstream squash-merges are detected). This intentionally
+  # includes upstream commits between the release tag and the branch's base:
+  # the patch was written against that newer main and may not apply to the
+  # bare release without them.
+  mapfile -t CHERRY < <(git cherry "$RELEASE_COMMIT" "$REF")
+  COMMITS=()
+  for line in "${CHERRY[@]}"; do
+    [ "${line:0:1}" = "+" ] && COMMITS+=("${line:2}")
+  done
+  if [ ${#COMMITS[@]} -eq 0 ]; then
+    log "patch $BRANCH: equivalent changes already in $TAG — skipping"
+    SKIPPED+=("$BRANCH (already upstream)")
+    continue
+  fi
+
+  log "patch $BRANCH: cherry-picking ${#COMMITS[@]} commit(s)"
+  for c in "${COMMITS[@]}"; do
+    [ -n "${PICKED_SHAS[$c]:-}" ] && continue
+    PICKED_SHAS[$c]=1
+    git cherry-pick "$c" >/dev/null 2>&1 && continue
+    # A commit an earlier patch branch already pulled in stops as an empty
+    # pick — skip it. Anything else is a real conflict: abort and die.
+    if [ -f "$(git rev-parse --git-dir)/CHERRY_PICK_HEAD" ] && [ -z "$(git status --porcelain)" ]; then
+      git cherry-pick --skip >/dev/null 2>&1
+    else
+      git cherry-pick --abort >/dev/null 2>&1 || true
+      die "conflict applying $BRANCH onto $TAG — resolve manually, then rerun. Binary untouched."
+    fi
+  done
+  APPLIED+=("$BRANCH (${#COMMITS[@]} commit(s))")
+done
+
+# --- 4. report / dry run ------------------------------------------------------
+if [ ${#APPLIED[@]} -eq 0 ]; then
+  log "patches applied: none"
+else
+  log "patches applied:"
+  for p in "${APPLIED[@]}"; do log "  + $p"; done
+fi
+if [ ${#SKIPPED[@]} -eq 0 ]; then
+  log "patches skipped: none"
+else
+  log "patches skipped:"
+  for p in "${SKIPPED[@]}"; do log "  - $p"; done
+fi
+if [ "${DRY_RUN:-0}" = "1" ]; then
+  log "DRY_RUN=1 — stopping before build"
+  exit 0
+fi
+
+# --- 5. build -----------------------------------------------------------------
+log "building (this takes a few minutes)"
+pnpm install --quiet
+pnpm --filter @moonshot-ai/kimi-code run build >/dev/null
+pnpm --filter @moonshot-ai/kimi-code run build:native:sea >/dev/null
+NEW_BIN="$REPO/apps/kimi-code/dist-native/bin/linux-x64/kimi"
+[ -x "$NEW_BIN" ] || die "build finished but $NEW_BIN is missing"
+
+NEW_VERSION=$("$NEW_BIN" --version)
+[ "$NEW_VERSION" = "$TARGET_VERSION" ] || log "warning: built --version $NEW_VERSION != target $TARGET_VERSION"
+
+# --- 6. swap the binary atomically --------------------------------------------
+mkdir -p "$BIN_DIR"
+if [ -f "$BIN_DIR/kimi" ]; then
+  cp "$BIN_DIR/kimi" "$BIN_DIR/kimi.prev.bak"
+fi
+# Same-filesystem rename: atomic, needs no extra space, safe while a server runs.
+mv -f "$NEW_BIN" "$BIN_DIR/kimi"
+NEW_HASH=$(sha256sum "$BIN_DIR/kimi" | awk '{print $1}')
+
+# --- 7. persist state ----------------------------------------------------------
+TMP=$(mktemp)
+jq --arg base "$TARGET_VERSION" --arg hash "$NEW_HASH" --arg phash "$PATCHES_HASH" --arg at "$(date -Is)" \
+  '.state.baseRelease = $base | .state.builtHash = $hash | .state.patchesHash = $phash | .state.builtAt = $at' \
+  "$STATE_FILE" > "$TMP" && mv "$TMP" "$STATE_FILE"
+
+log "done: kimi $TARGET_VERSION + ${#APPLIED[@]} patch(es) installed (sha256 ${NEW_HASH:0:12}…)"
+log "previous binary backed up at $BIN_DIR/kimi.prev.bak"
