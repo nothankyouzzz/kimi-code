@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { handleUpgrade } from '#/cli/sub/upgrade';
 import type { InstallPromptChoiceValue } from '#/cli/update/prompt';
@@ -73,6 +73,15 @@ function createDeps(overrides: {
 }
 
 describe('handleUpgrade', () => {
+  // Isolate from a real local patch-upgrade pipeline on the dev machine:
+  // handleUpgrade delegates to $KIMI_LOCAL_UPGRADE_SCRIPT when it exists.
+  beforeEach(() => {
+    vi.stubEnv('KIMI_LOCAL_UPGRADE_SCRIPT', '/nonexistent/kimi-upgrade-test-pipeline');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('prompts before installing the latest version when the install source supports it', async () => {
     const { stdout, stderr, writable } = captureOutput();
     const deps = createDeps({ latest: '0.5.0', source: 'npm-global' });

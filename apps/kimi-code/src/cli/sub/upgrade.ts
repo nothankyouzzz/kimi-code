@@ -1,3 +1,8 @@
+import { existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
 import { log, type Logger } from '@moonshot-ai/kimi-code-sdk';
 import { track as trackTelemetry, type TelemetryProperties } from '@moonshot-ai/kimi-telemetry';
 
@@ -75,6 +80,25 @@ export async function handleUpgrade(
   }
 
   const target = selectUpdateTarget(currentVersion, cache.latest);
+
+  // LOCAL-ONLY PATCH — never upstream. This binary is built from a patched
+  // source tree; installing the stock release would silently drop the local
+  // patches. When the external pipeline script exists, delegate the upgrade
+  // decision to it: it checks the upstream release, the local patch registry,
+  // and the installed binary, then rebuilds and swaps only when necessary.
+  // Pass the target release version if one is available, otherwise the current
+  // version so the script can still re-apply/rebuild changed patches for the
+  // same release. KIMI_LOCAL_UPGRADE_SCRIPT overrides the path. Absent the
+  // script, fall through to the stock behavior.
+  const localUpgradePipeline =
+    process.env['KIMI_LOCAL_UPGRADE_SCRIPT'] ??
+    join(homedir(), '.kimi-code', 'upgrade-with-patches.sh');
+  if (existsSync(localUpgradePipeline)) {
+    const versionToPass = target?.version ?? currentVersion;
+    const result = spawnSync(localUpgradePipeline, [versionToPass], { stdio: 'inherit' });
+    return result.status ?? 1;
+  }
+
   if (target === null) {
     trackUpgradeEvent(deps.track, 'upgrade_command_no_update', {
       current_version: currentVersion,
