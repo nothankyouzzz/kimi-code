@@ -7,10 +7,19 @@
 # ~/.kimi-code/upgrade-with-patches.sh — install/update it with install.sh.
 #
 # Invoked by the local `kimi upgrade` delegation hook (target version as $1),
-# or run directly. Idempotent: exits without rebuilding when the recorded
-# state already matches the target release AND the patch fingerprint (active
-# branches + their head commits) — a new or updated patch forces a rebuild
-# even when the release is unchanged.
+# or run directly. Before building, the pipeline syncs the local main branch
+# to upstream/main (fast-forward only) and rebases every active patch branch
+# onto upstream/main, so patches track the code their PRs target. Idempotent:
+# exits without rebuilding when the recorded state already matches the target
+# release AND the patch fingerprint (active branches + their head commits) —
+# a new, updated, or freshly rebased patch forces a rebuild even when the
+# release is unchanged.
+#
+# Conflict policy: conflicts confined to generated docs manifests
+# (docs/state-manifest.d.ts — it embeds compiler-internal unique-symbol ids
+# that drift on every regeneration) are auto-resolved by taking the patch
+# side. ANY other conflict — during rebase or cherry-pick — fails fast,
+# stops the build, and leaves the installed binary untouched.
 #
 # Env overrides:
 #   KIMI_PATCH_REPO   repo working tree (default ~/workspace/kimi-code)
@@ -27,6 +36,24 @@ TAG_PREFIX="@moonshot-ai/kimi-code@"
 
 log() { printf '[kimi-patched-upgrade] %s\n' "$*"; }
 die() { printf '[kimi-patched-upgrade] ERROR: %s\n' "$*" >&2; exit 1; }
+
+# When a rebase / cherry-pick stops on conflicts that are ALL in generated
+# docs manifests (state-manifest.d.ts), resolve them by taking the patch
+# side — "theirs" is the commit being replayed in both commands — and return
+# 0. The file carries compiler-internal unique-symbol ids that drift on every
+# regeneration, so the conflict is always noise; it is docs-only and never
+# reaches the built binary. Any other conflicted file → return 1.
+try_manifest_autoresolve() {
+  local unmerged
+  unmerged=$(git diff --name-only --diff-filter=U)
+  [ -n "$unmerged" ] || return 1
+  if printf '%s\n' "$unmerged" | grep -qv 'docs/state-manifest\.d\.ts$'; then
+    return 1
+  fi
+  log "auto-resolving generated-manifest conflict in: $unmerged"
+  printf '%s\n' "$unmerged" | xargs git checkout --theirs --
+  printf '%s\n' "$unmerged" | xargs git add --
+}
 
 [ -d "$REPO/.git" ] || die "repo not found at $REPO (set KIMI_PATCH_REPO)"
 [ -f "$STATE_FILE" ] || die "registry not found at $STATE_FILE"
@@ -50,6 +77,11 @@ fi
 cd "$REPO"
 [ -z "$(git status --porcelain)" ] || die "repo working tree is dirty; commit or stash first"
 
+GIT_DIR=$(git rev-parse --git-dir)
+PREV_REF=$(git symbolic-ref --short -q HEAD || git rev-parse HEAD)
+restore_ref() { git checkout --quiet "$PREV_REF" 2>/dev/null || true; }
+trap restore_ref EXIT
+
 # --- 1. resolve target version ---------------------------------------------
 TARGET_VERSION="${1:-}"
 if [ -z "$TARGET_VERSION" ]; then
@@ -59,12 +91,78 @@ fi
 [[ "$TARGET_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "bad target version: '$TARGET_VERSION'"
 TAG="${TAG_PREFIX}${TARGET_VERSION}"
 
-# Fingerprint of the effective patch inputs: the target release plus, for each
-# active patch, the branch name and the commit sha that would be applied
-# (extras pulled in by git cherry are ancestors of the branch head, so the
-# head sha pins them too). The idempotency check below must compare this — a
-# new/changed patch with an unchanged release is still a different build.
+# --- 2. sync main and rebase patch branches onto upstream/main --------------
+git fetch upstream main --quiet
+
+# The local main mirrors upstream main; fast-forward only. A diverged main
+# means someone committed directly to it — stop and let a human reconcile.
+git merge-base --is-ancestor main upstream/main \
+  || die "local main has diverged from upstream/main — reconcile manually, then rerun"
+if [ "$(git rev-parse main)" != "$(git rev-parse upstream/main)" ]; then
+  if [ "$(git symbolic-ref --short -q HEAD)" = "main" ]; then
+    git merge --ff-only upstream/main --quiet
+  else
+    git branch -f main upstream/main
+  fi
+  log "main synced to upstream/main ($(git rev-parse --short upstream/main))"
+fi
+
 PATCH_COUNT=$(jq '.patches | length' "$STATE_FILE")
+REBASED=()
+for i in $(seq 0 $((PATCH_COUNT - 1))); do
+  BRANCH=$(jq -r ".patches[$i].branch" "$STATE_FILE")
+  PR=$(jq -r ".patches[$i].pr" "$STATE_FILE")
+  STATUS=$(jq -r ".patches[$i].status" "$STATE_FILE")
+  [ "$STATUS" = "active" ] || continue
+
+  # Merged-PR detection up front: upstream already carries the change, and
+  # rebasing a squash-merged branch would replay it as bogus conflicts.
+  if [ "$PR" != "null" ]; then
+    PR_STATE=$(HTTPS_PROXY= HTTP_PROXY= https_proxy= http_proxy= \
+      gh pr view "$PR" -R "$UPSTREAM_REPO" --json state -q '.state' 2>/dev/null || echo "UNKNOWN")
+    if [ "$PR_STATE" = "MERGED" ]; then
+      log "patch $BRANCH: PR #$PR is merged — marking merged, skipping"
+      TMP=$(mktemp)
+      jq ".patches[$i].status = \"merged\"" "$STATE_FILE" > "$TMP" && mv "$TMP" "$STATE_FILE"
+      continue
+    fi
+  fi
+
+  # Rebasing rewrites the branch, so it must exist locally; create it from
+  # origin when only the remote ref is there.
+  if ! git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    git fetch origin "$BRANCH" --quiet
+    git show-ref --verify --quiet "refs/remotes/origin/$BRANCH" \
+      || die "patch branch $BRANCH not found locally or on origin"
+    git branch --track "$BRANCH" "origin/$BRANCH" >/dev/null
+  fi
+  # Already based on the latest upstream main — nothing to do.
+  git merge-base --is-ancestor upstream/main "$BRANCH" && continue
+
+  log "rebasing $BRANCH onto upstream/main"
+  git rebase upstream/main "$BRANCH" >/dev/null 2>&1 || true
+  while [ -d "$GIT_DIR/rebase-merge" ] || [ -d "$GIT_DIR/rebase-apply" ]; do
+    if ! try_manifest_autoresolve; then
+      git rebase --abort >/dev/null 2>&1 || true
+      die "conflict rebasing $BRANCH onto upstream/main — resolve manually (rebase it yourself, then rerun). Binary untouched."
+    fi
+    # The pick can become empty once the manifest noise is resolved (the rest
+    # of the commit was already upstream) — continue, falling back to skip.
+    GIT_EDITOR=true git rebase --continue >/dev/null 2>&1 \
+      || GIT_EDITOR=true git rebase --skip >/dev/null 2>&1 \
+      || { git rebase --abort >/dev/null 2>&1 || true
+           die "could not continue rebase of $BRANCH — resolve manually, then rerun. Binary untouched."; }
+  done
+  git merge-base --is-ancestor upstream/main "$BRANCH" \
+    || die "rebase of $BRANCH did not complete — resolve manually, then rerun. Binary untouched."
+  REBASED+=("$BRANCH")
+done
+
+# Fingerprint of the effective patch inputs: the target release plus, for each
+# active patch, the branch name and its post-rebase head commit (extras pulled
+# in by git cherry are ancestors of the branch head, so the head sha pins them
+# too). A new/changed/rebased patch with an unchanged release is still a
+# different build, so the idempotency check must compare this.
 FINGERPRINT_INPUT="$TARGET_VERSION"
 for i in $(seq 0 $((PATCH_COUNT - 1))); do
   F_BRANCH=$(jq -r ".patches[$i].branch" "$STATE_FILE")
@@ -85,8 +183,7 @@ if [ "$CURRENT_BASE" = "$TARGET_VERSION" ] && [ "$CURRENT_PATCHES_HASH" = "$PATC
 fi
 log "target release: $TARGET_VERSION (current base: ${CURRENT_BASE:-none})"
 
-# --- 2. fetch the release tag and check out a build branch ------------------
-git fetch upstream main --quiet
+# --- 3. fetch the release tag and check out a build branch ------------------
 if ! git rev-parse --verify "refs/tags/${TAG}^{commit}" >/dev/null 2>&1; then
   log "fetching tag $TAG"
   git fetch upstream "refs/tags/${TAG}:refs/tags/${TAG}" --quiet
@@ -94,13 +191,9 @@ fi
 RELEASE_COMMIT=$(git rev-parse "refs/tags/${TAG}^{}")
 log "release commit: $RELEASE_COMMIT"
 
-PREV_REF=$(git symbolic-ref --short -q HEAD || git rev-parse HEAD)
-restore_ref() { git checkout --quiet "$PREV_REF" 2>/dev/null || true; }
-trap restore_ref EXIT
-
 git checkout --quiet -B local/patched "$RELEASE_COMMIT"
 
-# --- 3. apply patches --------------------------------------------------------
+# --- 4. apply patches --------------------------------------------------------
 APPLIED=()
 SKIPPED=()
 # Upstream context commits (between the release tag and a patch branch's base)
@@ -111,37 +204,16 @@ SKIPPED=()
 declare -A PICKED_SHAS=()
 for i in $(seq 0 $((PATCH_COUNT - 1))); do
   BRANCH=$(jq -r ".patches[$i].branch" "$STATE_FILE")
-  PR=$(jq -r ".patches[$i].pr" "$STATE_FILE")
   STATUS=$(jq -r ".patches[$i].status" "$STATE_FILE")
   [ "$STATUS" = "active" ] || { SKIPPED+=("$BRANCH ($STATUS)"); continue; }
 
-  # Merged-PR detection: upstream already carries the change.
-  if [ "$PR" != "null" ]; then
-    PR_STATE=$(HTTPS_PROXY= HTTP_PROXY= https_proxy= http_proxy= \
-      gh pr view "$PR" -R "$UPSTREAM_REPO" --json state -q '.state' 2>/dev/null || echo "UNKNOWN")
-    if [ "$PR_STATE" = "MERGED" ]; then
-      log "patch $BRANCH: PR #$PR is merged — marking merged, skipping"
-      TMP=$(mktemp)
-      jq ".patches[$i].status = \"merged\"" "$STATE_FILE" > "$TMP" && mv "$TMP" "$STATE_FILE"
-      SKIPPED+=("$BRANCH (PR #$PR merged)")
-      continue
-    fi
-  fi
-
-  # Prefer the local branch (local-only patches never leave the machine);
-  # otherwise fetch the branch from origin.
-  if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
-    REF="$BRANCH"
-  else
-    git fetch origin "$BRANCH" --quiet
-    REF="origin/$BRANCH"
-  fi
   # Every commit the branch carries that the release does not (patch-id
   # comparison, so upstream squash-merges are detected). This intentionally
-  # includes upstream commits between the release tag and the branch's base:
-  # the patch was written against that newer main and may not apply to the
-  # bare release without them.
-  mapfile -t CHERRY < <(git cherry "$RELEASE_COMMIT" "$REF")
+  # includes upstream commits between the release tag and the branch's base
+  # (i.e. everything main gained since the release was cut): the patch was
+  # written against that newer main and may not apply to the bare release
+  # without them.
+  mapfile -t CHERRY < <(git cherry "$RELEASE_COMMIT" "$BRANCH")
   COMMITS=()
   for line in "${CHERRY[@]}"; do
     [ "${line:0:1}" = "+" ] && COMMITS+=("${line:2}")
@@ -158,18 +230,23 @@ for i in $(seq 0 $((PATCH_COUNT - 1))); do
     PICKED_SHAS[$c]=1
     git cherry-pick "$c" >/dev/null 2>&1 && continue
     # A commit an earlier patch branch already pulled in stops as an empty
-    # pick — skip it. Anything else is a real conflict: abort and die.
-    if [ -f "$(git rev-parse --git-dir)/CHERRY_PICK_HEAD" ] && [ -z "$(git status --porcelain)" ]; then
+    # pick — skip it.
+    if [ -f "$GIT_DIR/CHERRY_PICK_HEAD" ] && [ -z "$(git status --porcelain)" ]; then
       git cherry-pick --skip >/dev/null 2>&1
-    else
-      git cherry-pick --abort >/dev/null 2>&1 || true
-      die "conflict applying $BRANCH onto $TAG — resolve manually, then rerun. Binary untouched."
+      continue
     fi
+    # Generated-manifest-only conflicts are noise — take the patch side.
+    if try_manifest_autoresolve && GIT_EDITOR=true git cherry-pick --continue >/dev/null 2>&1; then
+      continue
+    fi
+    # Anything else is a real conflict: abort and die.
+    git cherry-pick --abort >/dev/null 2>&1 || true
+    die "conflict applying $BRANCH onto $TAG — resolve manually, then rerun. Binary untouched."
   done
   APPLIED+=("$BRANCH (${#COMMITS[@]} commit(s))")
 done
 
-# --- 4. report / dry run ------------------------------------------------------
+# --- 5. report / dry run ------------------------------------------------------
 if [ ${#APPLIED[@]} -eq 0 ]; then
   log "patches applied: none"
 else
@@ -182,12 +259,16 @@ else
   log "patches skipped:"
   for p in "${SKIPPED[@]}"; do log "  - $p"; done
 fi
+if [ ${#REBASED[@]} -ne 0 ]; then
+  log "rebased onto upstream/main (diverged from origin — force-push to update their PRs):"
+  for b in "${REBASED[@]}"; do log "  * $b"; done
+fi
 if [ "${DRY_RUN:-0}" = "1" ]; then
   log "DRY_RUN=1 — stopping before build"
   exit 0
 fi
 
-# --- 5. build -----------------------------------------------------------------
+# --- 6. build -----------------------------------------------------------------
 log "building (this takes a few minutes)"
 pnpm install --quiet
 pnpm --filter @moonshot-ai/kimi-code run build >/dev/null
@@ -198,7 +279,7 @@ NEW_BIN="$REPO/apps/kimi-code/dist-native/bin/linux-x64/kimi"
 NEW_VERSION=$("$NEW_BIN" --version)
 [ "$NEW_VERSION" = "$TARGET_VERSION" ] || log "warning: built --version $NEW_VERSION != target $TARGET_VERSION"
 
-# --- 6. swap the binary atomically --------------------------------------------
+# --- 7. swap the binary atomically --------------------------------------------
 mkdir -p "$BIN_DIR"
 if [ -f "$BIN_DIR/kimi" ]; then
   cp "$BIN_DIR/kimi" "$BIN_DIR/kimi.prev.bak"
@@ -207,7 +288,7 @@ fi
 mv -f "$NEW_BIN" "$BIN_DIR/kimi"
 NEW_HASH=$(sha256sum "$BIN_DIR/kimi" | awk '{print $1}')
 
-# --- 7. persist state ----------------------------------------------------------
+# --- 8. persist state ----------------------------------------------------------
 TMP=$(mktemp)
 jq --arg base "$TARGET_VERSION" --arg hash "$NEW_HASH" --arg phash "$PATCHES_HASH" --arg at "$(date -Is)" \
   '.state.baseRelease = $base | .state.builtHash = $hash | .state.patchesHash = $phash | .state.builtAt = $at' \
