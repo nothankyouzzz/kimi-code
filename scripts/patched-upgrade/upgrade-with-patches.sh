@@ -78,7 +78,10 @@ if [ -f "$REPO/.nvmrc" ]; then
 fi
 
 cd "$REPO"
-[ -z "$(git status --porcelain)" ] || die "repo working tree is dirty; commit or stash first"
+# Only tracked changes block the run: untracked files (editor swap files,
+# Syncthing .tmp artifacts, build leftovers) affect neither the cherry-picks
+# nor the build.
+[ -z "$(git status --porcelain --untracked-files=no)" ] || die "repo working tree has uncommitted changes; commit or stash first"
 
 GIT_DIR=$(git rev-parse --git-dir)
 PREV_REF=$(git symbolic-ref --short -q HEAD || git rev-parse HEAD)
@@ -243,8 +246,8 @@ for i in $(seq 0 $((PATCH_COUNT - 1))); do
     PICKED_SHAS[$c]=1
     git cherry-pick "$c" >/dev/null 2>&1 && continue
     # A commit an earlier patch branch already pulled in stops as an empty
-    # pick — skip it.
-    if [ -f "$GIT_DIR/CHERRY_PICK_HEAD" ] && [ -z "$(git status --porcelain)" ]; then
+    # pick — skip it. (Untracked files don't make the pick non-empty.)
+    if [ -f "$GIT_DIR/CHERRY_PICK_HEAD" ] && [ -z "$(git status --porcelain --untracked-files=no)" ]; then
       git cherry-pick --skip >/dev/null 2>&1
       continue
     fi
