@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -136,5 +136,85 @@ read_byte_budget = 65536
 
     expect(harness.imageLimits).toBe(limits);
     expect(harness.imageLimits?.maxEdgePx()).toBe(900);
+  });
+});
+
+describe('KimiHarness getUsageAggregate', () => {
+  function usageRecord(
+    model: string,
+    usage: { inputOther: number; output: number; inputCacheRead: number; inputCacheCreation: number },
+    time: number,
+    usageScope: 'session' | 'turn' = 'turn',
+  ): string {
+    return JSON.stringify({ type: 'usage.record', model, usage, usageScope, time });
+  }
+
+  function harnessFor(homeDir: string): KimiHarness {
+    return new KimiHarness(new StubRpc(), {
+      homeDir,
+      configPath: join(homeDir, 'config.toml'),
+      auth: { status: async () => ({ providers: [] }) } as never,
+      telemetry: recordingTelemetry([]),
+      ensureConfigFile: async () => undefined,
+      onClose: () => undefined,
+    });
+  }
+
+  it('folds usage.record ops across sessions from the local store, without any engine RPC', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-harness-'));
+    tempDirs.push(homeDir);
+    const now = Date.now();
+    const record = (inputOther: number, output: number, inputCacheRead: number) =>
+      usageRecord('kimi-k2', { inputOther, output, inputCacheRead, inputCacheCreation: 0 }, now - 500);
+
+    // v2-style per-agent wire log.
+    const v2Session = join(homeDir, 'sessions', 'wd_a_0000', 'session_00000000-0000-0000-0000-000000000001');
+    await mkdir(join(v2Session, 'agents', 'main'), { recursive: true });
+    await writeFile(
+      join(v2Session, 'agents', 'main', 'wire.jsonl'),
+      [
+        record(10, 5, 100),
+        usageRecord(
+          'kimi-k2',
+          { inputOther: 7, output: 3, inputCacheRead: 0, inputCacheCreation: 0 },
+          now - 400,
+          'session',
+        ),
+        // Outside the window — must be excluded.
+        usageRecord(
+          'kimi-k2',
+          { inputOther: 999, output: 999, inputCacheRead: 999, inputCacheCreation: 999 },
+          now - 10 * 24 * 3600 * 1000,
+        ),
+        '{"type":"context.message"}',
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    // Legacy root wire log in a second session.
+    const v1Session = join(homeDir, 'sessions', 'wd_b_1111', 'session_00000000-0000-0000-0000-000000000002');
+    await mkdir(v1Session, { recursive: true });
+    await writeFile(join(v1Session, 'wire.jsonl'), `${record(1, 2, 3)}\n`, 'utf-8');
+
+    const harness = harnessFor(homeDir);
+    // The StubRpc base throws NOT_IMPLEMENTED for getUsageAggregate — a
+    // passing assertion here pins the local-scan route.
+    const aggregate = await harness.getUsageAggregate(now - 3600_000);
+
+    expect(aggregate.sessionsScanned).toBe(2);
+    expect(aggregate.byModel).toEqual({
+      'kimi-k2': { inputOther: 18, output: 10, inputCacheRead: 103, inputCacheCreation: 0 },
+    });
+  });
+
+  it('reports an empty aggregate when the sessions store does not exist', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-harness-'));
+    tempDirs.push(homeDir);
+
+    const aggregate = await harnessFor(homeDir).getUsageAggregate(0);
+
+    expect(aggregate.sessionsScanned).toBe(0);
+    expect(aggregate.byModel).toEqual({});
   });
 });

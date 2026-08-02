@@ -8,6 +8,7 @@ import {
 } from '@moonshot-ai/agent-core';
 
 import { capabilityRpc, Session } from '#/session';
+import { scanLocalUsageAggregate } from '#/usage-aggregate';
 import type { KimiAuthFacade } from '#/auth';
 import type { SDKRpcClientBase } from '#/rpc';
 import type {
@@ -361,11 +362,13 @@ export class KimiHarness {
 
   /**
    * Cross-session usage aggregate since `sinceMs` (epoch ms), grouped by
-   * model — every persisted `usage.record` in the local sessions store
-   * (agent-core-v2 only). Durable-only lower-bound estimate.
+   * model — every persisted `usage.record` in the local sessions store.
+   * Engine-agnostic: a pure filesystem scan (`scanLocalUsageAggregate`), so
+   * the v1 engine — which has no aggregation RPC — is covered too.
+   * Durable-only lower-bound estimate.
    */
   async getUsageAggregate(sinceMs: number): Promise<UsageAggregate> {
-    return this.rpc.getUsageAggregate(sinceMs);
+    return scanLocalUsageAggregate(this.homeDir, sinceMs);
   }
 
   async ensureConfigFile(): Promise<void> {
