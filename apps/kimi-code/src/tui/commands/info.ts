@@ -1,5 +1,6 @@
 import { release as osRelease, type as osType } from 'node:os';
 
+import { SECONDARY_DERIVED_MODEL_ALIAS } from '@moonshot-ai/kimi-code-sdk';
 import type { McpServerInfo, SessionStatus, SessionUsage } from '@moonshot-ai/kimi-code-sdk';
 
 import { buildMcpStatusReportLines } from '../components/messages/mcp-status-panel';
@@ -284,7 +285,9 @@ async function loadWeeklyValueReport(
   try {
     const aggregate = await host.harness.getUsageAggregate(sinceMs);
     if (aggregate.sessionsScanned === 0) return undefined;
-    const estimate = estimateWeeklyValue(aggregate.byModel);
+    const estimate = estimateWeeklyValue(aggregate.byModel, (model) =>
+      pricingModelId(host, model),
+    );
     if (weeklyRow !== undefined && weeklyRow.limit > 0 && weeklyRow.used > 0) {
       const quotaUsedRatio = weeklyRow.used / weeklyRow.limit;
       return { ...estimate, quotaUsedRatio, weeklyQuotaUsd: estimate.totalUsd / quotaUsedRatio };
@@ -301,6 +304,18 @@ function weeklyLimitRow(usage: ManagedUsageReport): ManagedUsageRow | undefined 
     (row): row is ManagedUsageRow => row !== null,
   );
   return rows.find((row) => row.window?.unit === 'week') ?? usage.summary ?? undefined;
+}
+
+/**
+ * The model id a recorded alias prices at. `__secondary__` usage belongs to
+ * the configured secondary (subagent) model, so price it by that entry's
+ * underlying model id from the effective config; when the derived entry is
+ * gone (the recipe changed since the usage was recorded), keep the alias and
+ * let it fall back to the default rate.
+ */
+function pricingModelId(host: SlashCommandHost, model: string): string {
+  if (model !== SECONDARY_DERIVED_MODEL_ALIAS) return model;
+  return host.state.appState.availableModels[model]?.model ?? model;
 }
 
 function parseResetMs(resetAt: string | undefined): number | undefined {

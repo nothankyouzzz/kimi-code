@@ -306,7 +306,8 @@ function buildWeeklyValueSection(
   return lines;
 }
 
-export function buildManagedUsageReportLines(options: ManagedUsageReportLineOptions): string[] {  const accent = (text: string) => currentTheme.boldFg('primary', text);
+export function buildManagedUsageReportLines(options: ManagedUsageReportLineOptions): string[] {
+  const accent = (text: string) => currentTheme.boldFg('primary', text);
   const value = (text: string) => currentTheme.fg('text', text);
   const muted = (text: string) => currentTheme.fg('textDim', text);
   const errorStyle = (text: string) => currentTheme.fg('error', text);

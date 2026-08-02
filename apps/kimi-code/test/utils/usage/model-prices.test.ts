@@ -16,6 +16,22 @@ describe('modelPriceFor', () => {
     expect(modelPriceFor('kimi-k3').output).toBe(15.0);
   });
 
+  it('matches provider-qualified aliases on the model segment', () => {
+    expect(modelPriceFor('kimi-code/k3-256k')).toEqual({
+      input: 3.0,
+      output: 15.0,
+      cacheRead: 0.3,
+      cacheCreation: 3.0,
+    });
+    expect(modelPriceFor('kimi-code/k3').output).toBe(15.0);
+    expect(modelPriceFor('kimi-code/kimi-for-coding').input).toBe(0.95);
+    expect(modelPriceFor('kimi-code/kimi-for-coding-highspeed').output).toBe(8.0);
+  });
+
+  it('does not let the provider prefix produce a false hit', () => {
+    expect(modelPriceFor('k3-relay/some-future-model')).toBe(DEFAULT_MODEL_PRICE);
+  });
+
   it('falls back to the default coding-model rate for unknown models', () => {
     expect(modelPriceFor('some-future-model')).toBe(DEFAULT_MODEL_PRICE);
   });
@@ -55,6 +71,22 @@ describe('estimateWeeklyValue', () => {
       outputTokens: 0,
       cacheReadTokens: 0,
     });
+  });
+
+  it('prices resolved aliases (e.g. __secondary__) at the target model rate', () => {
+    const usage = {
+      inputOther: 0,
+      output: 1_000_000,
+      inputCacheRead: 0,
+      inputCacheCreation: 0,
+    };
+    const estimate = estimateWeeklyValue(
+      { __secondary__: usage, 'kimi-code/k3-256k': usage },
+      (model) => (model === '__secondary__' ? 'kimi-for-coding' : model),
+    );
+    // __secondary__ → kimi-for-coding ($4.00/M output) + k3-256k ($15.00/M output)
+    expect(estimate.totalUsd).toBeCloseTo(19.0);
+    expect(estimate.outputTokens).toBe(2_000_000);
   });
 });
 
