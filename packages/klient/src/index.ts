@@ -34,6 +34,7 @@ export type {
   GlobalKosongFacade,
   GlobalPluginsFacade,
   GlobalSessionsFacade,
+  GlobalUsageFacade,
   GlobalWorkspacesFacade,
   KlientEnvInfo,
   ModelCatalogItem,

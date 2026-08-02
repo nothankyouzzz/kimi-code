@@ -221,6 +221,14 @@ export function defineKlientConformance(
       expect(Array.isArray(browse.entries)).toBe(true);
     });
 
+    it('usage.aggregate returns a well-formed cross-session aggregate', async () => {
+      const since = Date.now() - 7 * 24 * 3600 * 1000;
+      const aggregate = await target.klient.global.usage.aggregate(since);
+      expect(aggregate.since).toBe(since);
+      expect(typeof aggregate.sessionsScanned).toBe('number');
+      expect(typeof aggregate.byModel).toBe('object');
+    });
+
     it('kosong lists models/providers and anonymous provider round-trips', async () => {
       const kosong = target.klient.global.kosong;
       expect(Array.isArray(await kosong.listModels())).toBe(true);

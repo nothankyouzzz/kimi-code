@@ -16,6 +16,7 @@ import type {
   Workspace,
   WorkspaceUpdate,
 } from '@moonshot-ai/agent-core-v2/app/workspace/workspace';
+import type { UsageAggregate } from '@moonshot-ai/agent-core-v2/app/usageAggregate/usageAggregate';
 import type {
   ConfigDiagnostic,
   ConfigInspectValue,
@@ -221,6 +222,16 @@ export interface GlobalHostFsFacade {
   home(): Promise<FsHomeResponse>;
 }
 
+export interface GlobalUsageFacade {
+  /**
+   * Fold every persisted `usage.record` op across all sessions (any
+   * workspace, archived included) with `time >= sinceMs` into per-model
+   * token totals. Durable-only: records still buffered in a live agent's
+   * append log are invisible, so the result is a lower-bound estimate.
+   */
+  aggregate(sinceMs: number): Promise<UsageAggregate>;
+}
+
 /** Aggregated host/environment snapshot (`bootstrapService` properties). */
 export interface KlientEnvInfo {
   readonly platform: string;
@@ -247,6 +258,7 @@ export interface GlobalFacade {
   readonly plugins: GlobalPluginsFacade;
   readonly capabilities: GlobalCapabilitiesFacade;
   readonly hostFs: GlobalHostFsFacade;
+  readonly usage: GlobalUsageFacade;
   env(): Promise<KlientEnvInfo>;
 }
 
@@ -468,6 +480,11 @@ export function createGlobalFacade(scoped: ScopedCaller, scopedStream: ScopedStr
       browse: (absPath) =>
         call('hostFolderBrowser', 'browse', [absPath]) as Promise<FsBrowseResponse>,
       home: () => call('hostFolderBrowser', 'home', []) as Promise<FsHomeResponse>,
+    },
+
+    usage: {
+      aggregate: (sinceMs) =>
+        call('usageAggregateService', 'aggregate', [sinceMs]) as Promise<UsageAggregate>,
     },
 
     env,

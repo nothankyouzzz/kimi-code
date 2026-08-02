@@ -263,6 +263,18 @@ export interface SessionUsage {
   readonly total?: TokenUsage | undefined;
 }
 
+/**
+ * Cross-session usage aggregate: every persisted `usage.record` with
+ * `time >= since`, grouped by model. Durable-only — records still buffered
+ * in a live agent's append log are invisible, so this is a lower-bound
+ * estimate.
+ */
+export interface UsageAggregate {
+  readonly since: number;
+  readonly byModel: Record<string, TokenUsage>;
+  readonly sessionsScanned: number;
+}
+
 export interface SessionStatus {
   readonly model?: string;
   readonly thinkingEffort: string;

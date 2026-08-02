@@ -135,6 +135,48 @@ describe('UsagePanelComponent', () => {
     expect(output).toContain('░');
   });
 
+  it('renders the weekly API value estimate when provided', () => {
+    const lines = buildUsageReportLines({
+      sessionUsage: { byModel: {} },
+      contextUsage: 0,
+      contextTokens: 0,
+      maxContextTokens: 0,
+      managedUsage: {
+        summary: { window: { duration: 1, unit: 'week' }, used: 4, limit: 10 },
+        limits: [],
+      },
+      weeklyValue: {
+        totalUsd: 12.34,
+        inputTokens: 1_200_000,
+        outputTokens: 300_000,
+        cacheReadTokens: 5_600_000,
+      },
+    }).map(strip);
+
+    const output = lines.join('\n');
+    expect(lines).toContain('Weekly API value (est.)');
+    expect(output).toContain('$12.34');
+    expect(output).toContain('at API list price');
+    expect(output).toContain('input 1.1M');
+    expect(output).toContain('output 293k');
+    expect(output).toContain('cache read 5.3M');
+  });
+
+  it('omits the weekly API value section when no estimate is provided', () => {
+    const lines = buildUsageReportLines({
+      sessionUsage: { byModel: {} },
+      contextUsage: 0,
+      contextTokens: 0,
+      maxContextTokens: 0,
+      managedUsage: {
+        summary: { window: { duration: 1, unit: 'week' }, used: 4, limit: 10 },
+        limits: [],
+      },
+    }).map(strip);
+
+    expect(lines.join('\n')).not.toContain('Weekly API value');
+  });
+
   it('formats extra usage without a monthly limit and omits the progress bar', () => {
     const lines = buildUsageReportLines({
       sessionUsage: { byModel: {} },

@@ -118,6 +118,7 @@ import type {
   SessionListQuery,
   SessionSummary,
 } from '@moonshot-ai/agent-core-v2/app/sessionIndex/sessionIndex';
+import type { UsageAggregate } from '@moonshot-ai/agent-core-v2/app/usageAggregate/usageAggregate';
 import type {
   Workspace,
   WorkspaceUpdate,
@@ -287,6 +288,7 @@ import {
   sessionListQuerySchema,
   sessionSummarySchema,
 } from '../src/contract/global/sessions.js';
+import { usageAggregateSchema } from '../src/contract/global/usageAggregate.js';
 import {
   workspaceSchema,
   workspaceUpdateSchema,
@@ -323,6 +325,9 @@ type ConfigTargetValues = `${ConfigTarget}`;
 // sessions.ts
 const _sessionSummary: AssertWire<typeof sessionSummarySchema, SessionSummary> = true;
 const _sessionListQuery: AssertWire<typeof sessionListQuerySchema, SessionListQuery> = true;
+
+// usageAggregate.ts
+const _usageAggregate: AssertWire<typeof usageAggregateSchema, UsageAggregate> = true;
 
 // workspaces.ts
 const _workspace: AssertWire<typeof workspaceSchema, Workspace> = true;

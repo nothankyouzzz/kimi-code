@@ -39,6 +39,7 @@ import type {
   TelemetryContextPatch,
   TelemetryProperties,
   TestMcpServerOptions,
+  UsageAggregate,
   WorkspaceTrustInfo,
 } from '#/types';
 
@@ -356,6 +357,15 @@ export class KimiHarness {
 
   async getExperimentalFeatures(): Promise<readonly ExperimentalFeatureState[]> {
     return this.rpc.getExperimentalFeatures();
+  }
+
+  /**
+   * Cross-session usage aggregate since `sinceMs` (epoch ms), grouped by
+   * model — every persisted `usage.record` in the local sessions store
+   * (agent-core-v2 only). Durable-only lower-bound estimate.
+   */
+  async getUsageAggregate(sinceMs: number): Promise<UsageAggregate> {
+    return this.rpc.getUsageAggregate(sinceMs);
   }
 
   async ensureConfigFile(): Promise<void> {

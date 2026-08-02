@@ -53,6 +53,7 @@ import type {
   SessionPlan,
   SessionStatus,
   SessionUsage,
+  UsageAggregate,
   PromptInput,
   RenameSessionInput,
   ResumeSessionInput,
@@ -599,6 +600,18 @@ export abstract class SDKRpcClientBase {
       sessionId: input.sessionId,
       agentId: this.interactiveAgentId,
     });
+  }
+
+  /**
+   * Cross-session usage aggregate (every persisted `usage.record` with
+   * `time >= sinceMs`, grouped by model). v2-only: the v1 engine has no
+   * aggregation service, so the base implementation reports NOT_IMPLEMENTED.
+   */
+  async getUsageAggregate(_sinceMs: number): Promise<UsageAggregate> {
+    throw new KimiError(
+      ErrorCodes.NOT_IMPLEMENTED,
+      'This SDK client does not support cross-session usage aggregation.',
+    );
   }
 
   async getStatus(input: SessionIdRpcInput): Promise<SessionStatus> {

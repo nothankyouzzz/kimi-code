@@ -30,6 +30,7 @@ import { modelsContract } from './global/models.js';
 import { pluginsContract } from './global/plugins.js';
 import { providersContract } from './global/providers.js';
 import { sessionsContract } from './global/sessions.js';
+import { usageAggregateContract } from './global/usageAggregate.js';
 import { workspacesContract } from './global/workspaces.js';
 import { sessionApprovalContract } from './session/approval.js';
 import { sessionInteractionContract } from './session/interaction.js';
@@ -57,6 +58,7 @@ export const globalContract: KlientContract = {
   capabilityService: capabilitiesContract,
   hostFolderBrowser: hostFsContract,
   bootstrapService: envContract,
+  usageAggregateService: usageAggregateContract,
   // workspace scope (+ the app-registered handler registry)
   workspaceLifecycleService: workspaceLifecycleContract,
   sessionLifecycleService: sessionLifecycleContract,

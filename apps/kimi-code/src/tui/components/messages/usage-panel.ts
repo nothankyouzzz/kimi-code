@@ -16,6 +16,7 @@ import {
   safeUsageRatio,
   usagePercent,
 } from '#/utils/usage/usage-format';
+import { formatUsd } from '#/utils/usage/model-prices';
 import { currentTheme } from '#/tui/theme';
 import type { ColorToken } from '#/tui/theme';
 
@@ -72,6 +73,14 @@ export interface ManagedUsageReport {
   readonly extraUsage?: BoosterWalletInfo | null;
 }
 
+/** Estimated API list-price value of the current weekly window's token usage. */
+export interface WeeklyValueReport {
+  readonly totalUsd: number;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheReadTokens: number;
+}
+
 export interface UsageReportOptions {
   readonly sessionUsage?: SessionUsage;
   readonly sessionUsageError?: string;
@@ -80,6 +89,7 @@ export interface UsageReportOptions {
   readonly maxContextTokens: number;
   readonly managedUsage?: ManagedUsageReport;
   readonly managedUsageError?: string;
+  readonly weeklyValue?: WeeklyValueReport;
 }
 
 export interface ManagedUsageReportLineOptions {
@@ -260,8 +270,24 @@ export function buildExtraUsageSection(
   return lines;
 }
 
-export function buildManagedUsageReportLines(options: ManagedUsageReportLineOptions): string[] {
-  const accent = (text: string) => currentTheme.boldFg('primary', text);
+function buildWeeklyValueSection(
+  report: WeeklyValueReport,
+  accent: Colorize,
+  value: Colorize,
+  muted: Colorize,
+): string[] {
+  return [
+    accent('Weekly API value (est.)'),
+    `  ${value(formatUsd(report.totalUsd))}  ${muted('at API list price')}`,
+    `  ${muted(
+      `input ${formatTokenCount(report.inputTokens)} · output ${formatTokenCount(
+        report.outputTokens,
+      )} · cache read ${formatTokenCount(report.cacheReadTokens)}`,
+    )}`,
+  ];
+}
+
+export function buildManagedUsageReportLines(options: ManagedUsageReportLineOptions): string[] {  const accent = (text: string) => currentTheme.boldFg('primary', text);
   const value = (text: string) => currentTheme.fg('text', text);
   const muted = (text: string) => currentTheme.fg('textDim', text);
   const errorStyle = (text: string) => currentTheme.fg('error', text);
@@ -317,6 +343,11 @@ export function buildUsageReportLines(options: UsageReportOptions): string[] {
   if (managedSection.length > 0) {
     lines.push('');
     lines.push(...managedSection);
+  }
+
+  if (options.weeklyValue !== undefined) {
+    lines.push('');
+    lines.push(...buildWeeklyValueSection(options.weeklyValue, accent, value, muted));
   }
 
   const extraSection = buildExtraUsageSection(

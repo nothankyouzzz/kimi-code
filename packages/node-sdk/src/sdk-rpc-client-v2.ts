@@ -299,6 +299,7 @@ import type {
   SessionUsage,
   SkillSummary,
   TelemetryClient,
+  UsageAggregate,
   WorkspaceTrustInfo,
 } from '#/types';
 import {
@@ -1473,6 +1474,11 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   override async getUsage(input: SessionIdRpcInput): Promise<SessionUsage> {
     const agent = await this.agentFacade(input.sessionId);
     return agent.getUsage();
+  }
+
+  /** Facade (`usageAggregateService.aggregate`) — App-scope, no session. */
+  override async getUsageAggregate(sinceMs: number): Promise<UsageAggregate> {
+    return this.klient.global.usage.aggregate(sinceMs);
   }
 
   /**

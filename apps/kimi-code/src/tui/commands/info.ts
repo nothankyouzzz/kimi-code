@@ -4,7 +4,12 @@ import type { McpServerInfo, SessionStatus, SessionUsage } from '@moonshot-ai/ki
 
 import { buildMcpStatusReportLines } from '../components/messages/mcp-status-panel';
 import { buildStatusReportLines } from '../components/messages/status-panel';
-import { buildUsageReportLines, UsagePanelComponent, type ManagedUsageReport } from '../components/messages/usage-panel';
+import {
+  buildUsageReportLines,
+  UsagePanelComponent,
+  type ManagedUsageReport,
+  type WeeklyValueReport,
+} from '../components/messages/usage-panel';
 import {
   FEEDBACK_ISSUE_URL,
   FEEDBACK_STATUS_CANCELLED,
@@ -23,6 +28,7 @@ import {
 import { DEFAULT_OAUTH_PROVIDER_NAME, isManagedUsageProvider } from '../constant/kimi-tui';
 import { submitFeedbackWithAttachments } from '../../feedback/feedback-attachments';
 import { formatErrorMessage } from '../utils/event-payload';
+import { estimateWeeklyValue } from '#/utils/usage/model-prices';
 import { openUrl } from '#/utils/open-url';
 import { promptFeedbackAttachment, promptFeedbackInput } from './prompts';
 import type { SlashCommandHost } from './dispatch';
@@ -147,6 +153,7 @@ interface ManagedUsageResult {
 export async function showUsage(host: SlashCommandHost): Promise<void> {
   const sessionUsage = await loadSessionUsageReport(host);
   const managedUsage = await loadManagedUsageReport(host);
+  const weeklyValue = await loadWeeklyValueReport(host, managedUsage);
   const reportArgs = {
     sessionUsage: sessionUsage.usage,
     sessionUsageError: sessionUsage.error,
@@ -155,6 +162,7 @@ export async function showUsage(host: SlashCommandHost): Promise<void> {
     maxContextTokens: host.state.appState.maxContextTokens,
     managedUsage: managedUsage?.usage,
     managedUsageError: managedUsage?.error,
+    weeklyValue,
   };
   const panel = new UsagePanelComponent(() => buildUsageReportLines(reportArgs), 'primary');
   host.state.transcriptContainer.addChild(panel);
@@ -248,4 +256,29 @@ async function loadManagedUsageReport(host: SlashCommandHost): Promise<ManagedUs
     return { error: res.message };
   }
   return { usage: { summary: res.summary, limits: res.limits, extraUsage: res.extraUsage } };
+}
+
+const WEEK_MS = 7 * 24 * 3600 * 1000;
+
+/**
+ * Estimated API list-price value of the current weekly window. Only
+ * meaningful alongside a managed plan report; the window start is derived
+ * from the weekly limit's next reset. Unsupported engines (v1) and scan
+ * failures stay silent — the section is an estimate, not a billing fact.
+ */
+async function loadWeeklyValueReport(
+  host: SlashCommandHost,
+  managedUsage: ManagedUsageResult | undefined,
+): Promise<WeeklyValueReport | undefined> {
+  const summary = managedUsage?.usage?.summary;
+  if (summary === undefined || summary === null) return undefined;
+  const resetMs = summary.resetAt !== undefined ? Date.parse(summary.resetAt) : Number.NaN;
+  const sinceMs = Number.isFinite(resetMs) ? resetMs - WEEK_MS : Date.now() - WEEK_MS;
+  try {
+    const aggregate = await host.harness.getUsageAggregate(sinceMs);
+    if (aggregate.sessionsScanned === 0) return undefined;
+    return estimateWeeklyValue(aggregate.byModel);
+  } catch {
+    return undefined;
+  }
 }
