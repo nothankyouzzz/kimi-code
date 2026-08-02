@@ -79,6 +79,18 @@ export interface WeeklyValueReport {
   readonly inputTokens: number;
   readonly outputTokens: number;
   readonly cacheReadTokens: number;
+  /**
+   * Backend-reported weekly quota consumption (`used / limit`) the whole-
+   * quota calibration divides by; undefined when the plan report carries no
+   * weekly row with non-zero usage.
+   */
+  readonly quotaUsedRatio?: number;
+  /**
+   * The whole weekly quota's list-price equivalent, calibrated as
+   * `totalUsd / quotaUsedRatio`. Local durable-only spend over account-wide
+   * backend metering — a rough calibration, not a billing fact.
+   */
+  readonly weeklyQuotaUsd?: number;
 }
 
 export interface UsageReportOptions {
@@ -276,7 +288,7 @@ function buildWeeklyValueSection(
   value: Colorize,
   muted: Colorize,
 ): string[] {
-  return [
+  const lines = [
     accent('Weekly API value (est.)'),
     `  ${value(formatUsd(report.totalUsd))}  ${muted('at API list price')}`,
     `  ${muted(
@@ -285,6 +297,13 @@ function buildWeeklyValueSection(
       )} · cache read ${formatTokenCount(report.cacheReadTokens)}`,
     )}`,
   ];
+  if (report.weeklyQuotaUsd !== undefined && report.quotaUsedRatio !== undefined) {
+    const pct = `${Math.round(report.quotaUsedRatio * 100)}%`;
+    lines.push(
+      `  ${muted(`weekly quota ≈ ${formatUsd(report.weeklyQuotaUsd)} · calibrated at ${pct} used`)}`,
+    );
+  }
+  return lines;
 }
 
 export function buildManagedUsageReportLines(options: ManagedUsageReportLineOptions): string[] {  const accent = (text: string) => currentTheme.boldFg('primary', text);

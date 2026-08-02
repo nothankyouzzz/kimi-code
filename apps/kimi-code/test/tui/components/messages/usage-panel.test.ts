@@ -162,6 +162,54 @@ describe('UsagePanelComponent', () => {
     expect(output).toContain('cache read 5.3M');
   });
 
+  it('renders the whole-quota calibration line when the used ratio is provided', () => {
+    const lines = buildUsageReportLines({
+      sessionUsage: { byModel: {} },
+      contextUsage: 0,
+      contextTokens: 0,
+      maxContextTokens: 0,
+      managedUsage: {
+        summary: { window: { duration: 1, unit: 'week' }, used: 4, limit: 10 },
+        limits: [],
+      },
+      weeklyValue: {
+        totalUsd: 12.34,
+        inputTokens: 1_200_000,
+        outputTokens: 300_000,
+        cacheReadTokens: 5_600_000,
+        quotaUsedRatio: 0.1,
+        weeklyQuotaUsd: 123.4,
+      },
+    }).map(strip);
+
+    const output = lines.join('\n');
+    expect(output).toContain('weekly quota ≈ $123.40');
+    expect(output).toContain('calibrated at 10% used');
+  });
+
+  it('omits the calibration line when the used ratio is absent', () => {
+    const lines = buildUsageReportLines({
+      sessionUsage: { byModel: {} },
+      contextUsage: 0,
+      contextTokens: 0,
+      maxContextTokens: 0,
+      managedUsage: {
+        summary: { window: { duration: 1, unit: 'week' }, used: 4, limit: 10 },
+        limits: [],
+      },
+      weeklyValue: {
+        totalUsd: 12.34,
+        inputTokens: 1_200_000,
+        outputTokens: 300_000,
+        cacheReadTokens: 5_600_000,
+      },
+    }).map(strip);
+
+    const output = lines.join('\n');
+    expect(output).toContain('Weekly API value (est.)');
+    expect(output).not.toContain('weekly quota');
+  });
+
   it('omits the weekly API value section when no estimate is provided', () => {
     const lines = buildUsageReportLines({
       sessionUsage: { byModel: {} },

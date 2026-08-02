@@ -8,6 +8,7 @@ import {
   buildUsageReportLines,
   UsagePanelComponent,
   type ManagedUsageReport,
+  type ManagedUsageRow,
   type WeeklyValueReport,
 } from '../components/messages/usage-panel';
 import {
@@ -265,7 +266,9 @@ const WEEK_MS = 7 * 24 * 3600 * 1000;
  * managed-usage providers; the window start derives from the weekly limit's
  * next reset when the plan report carries one (the summary row is the
  * weekly limit, but the backend may omit it and list the weekly limit among
- * `limits` instead), otherwise falls back to the trailing 7 days. Scan
+ * `limits` instead), otherwise falls back to the trailing 7 days. When the
+ * weekly row reports a non-zero used ratio, the estimate is also scaled
+ * into the whole quota's list-price equivalent (`spent ÷ used%`). Scan
  * failures stay silent — the section is an estimate, not a billing fact.
  */
 async function loadWeeklyValueReport(
@@ -274,23 +277,33 @@ async function loadWeeklyValueReport(
 ): Promise<WeeklyValueReport | undefined> {
   // Not a managed-usage provider: no weekly plan window to estimate against.
   if (managedUsage === undefined) return undefined;
-  const resetMs =
-    managedUsage.usage === undefined ? undefined : weeklyResetMs(managedUsage.usage);
+  const weeklyRow =
+    managedUsage.usage === undefined ? undefined : weeklyLimitRow(managedUsage.usage);
+  const resetMs = parseResetMs(weeklyRow?.resetAt ?? managedUsage.usage?.summary?.resetAt);
   const sinceMs = resetMs === undefined ? Date.now() - WEEK_MS : resetMs - WEEK_MS;
   try {
     const aggregate = await host.harness.getUsageAggregate(sinceMs);
     if (aggregate.sessionsScanned === 0) return undefined;
-    return estimateWeeklyValue(aggregate.byModel);
+    const estimate = estimateWeeklyValue(aggregate.byModel);
+    if (weeklyRow !== undefined && weeklyRow.limit > 0 && weeklyRow.used > 0) {
+      const quotaUsedRatio = weeklyRow.used / weeklyRow.limit;
+      return { ...estimate, quotaUsedRatio, weeklyQuotaUsd: estimate.totalUsd / quotaUsedRatio };
+    }
+    return estimate;
   } catch {
     return undefined;
   }
 }
 
-/** Next reset of the weekly-window row, as epoch ms; undefined when absent. */
-function weeklyResetMs(usage: ManagedUsageReport): number | undefined {
-  const rows = [usage.summary, ...usage.limits];
-  const weekly = rows.find((row) => row?.window?.unit === 'week');
-  const resetAt = weekly?.resetAt ?? usage.summary?.resetAt;
+/** The weekly-window limit row; falls back to the summary row. */
+function weeklyLimitRow(usage: ManagedUsageReport): ManagedUsageRow | undefined {
+  const rows = [usage.summary, ...usage.limits].filter(
+    (row): row is ManagedUsageRow => row !== null,
+  );
+  return rows.find((row) => row.window?.unit === 'week') ?? usage.summary ?? undefined;
+}
+
+function parseResetMs(resetAt: string | undefined): number | undefined {
   if (resetAt === undefined) return undefined;
   const parsed = Date.parse(resetAt);
   return Number.isFinite(parsed) ? parsed : undefined;
