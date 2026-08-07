@@ -1,0 +1,31 @@
+{
+  "patches": [
+    {
+      "branch": "local/upgrade-hook",
+      "pr": null,
+      "status": "active",
+      "localOnly": true
+    },
+    {
+      "branch": "fix/empty-image-session-poisoning",
+      "pr": 2249,
+      "status": "active"
+    },
+    {
+      "branch": "fix/wsl-clipboard-bmp",
+      "pr": 1962,
+      "status": "active"
+    },
+    {
+      "branch": "feat/usage-weekly-api-value",
+      "pr": null,
+      "status": "active",
+      "localOnly": true
+    },
+    {
+      "branch": "fix/wezterm-inline-image",
+      "pr": 2539,
+      "status": "active"
+    }
+  ]
+}
