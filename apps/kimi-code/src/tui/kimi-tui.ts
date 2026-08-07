@@ -103,6 +103,7 @@ import {
 import { StepSummaryComponent } from './components/messages/step-summary';
 import { ThinkingComponent } from './components/messages/thinking';
 import { ToolCallComponent } from './components/messages/tool-call';
+import { setMediaBlobSessionDir } from './components/messages/tool-renderers/media';
 import {
   ReplayTurnBoundaryComponent,
   UserMessageComponent,
@@ -2382,6 +2383,7 @@ export class KimiTUI {
     if (previous !== undefined) this.staging.releaseAll();
     this.session = session;
     this.harness.setTelemetryContext({ sessionId: session.id });
+    setMediaBlobSessionDir(session.summary?.sessionDir);
     this.registerSessionHandlers(session);
     this.syncAdditionalDirs(session);
   }
@@ -2466,6 +2468,7 @@ export class KimiTUI {
     this.session = undefined;
     this.state.swarmModeEntry = undefined;
     this.harness.setTelemetryContext({ sessionId: null });
+    setMediaBlobSessionDir(undefined);
     this.setAppState({ goal: null });
     return previous;
   }
@@ -2702,6 +2705,7 @@ export class KimiTUI {
     this.resetSessionRuntime();
     this.session = session;
     this.harness.setTelemetryContext({ sessionId: session.id });
+    setMediaBlobSessionDir(session.summary?.sessionDir);
     this.registerSessionHandlers(session);
     await this.syncRuntimeState(session);
     this.updateTerminalTitle();

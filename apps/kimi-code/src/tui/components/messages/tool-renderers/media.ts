@@ -11,10 +11,19 @@
  * On error, or when the output isn't the expected media envelope, we
  * fall back to the truncated renderer so the user still sees the raw
  * message.
+ *
+ * Persisted sessions add a wrinkle: agent-core's BlobStore offloads large
+ * `data:` URIs to `<sessionDir>/agents/<agentId>/blobs/<sha256>` and rewrites
+ * the URL to `blobref:<mime>;<sha256>` in wire.jsonl. Live events still carry
+ * the inline data URL, but replayed records carry the blobref — so the inline
+ * preview resolves blobrefs back from the session's blob store (see
+ * `setMediaBlobSessionDir`).
  */
 
-import type { Component } from '@moonshot-ai/pi-tui';
-import { Text } from '@moonshot-ai/pi-tui';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+
+import { Image, Text, getCapabilities, type Component, type ImageTheme } from '@moonshot-ai/pi-tui';
 
 import { currentTheme } from '#/tui/theme';
 
@@ -28,10 +37,13 @@ export interface ReadMediaSummary {
   mimeType?: string;
   bytes?: number;
   url?: string;
+  base64?: string;
+  blobHash?: string;
 }
 
 const PATH_TAG_RE = /^<(image|video)\s+path="([^"]+)">$/;
 const DATA_URL_RE = /^data:([^;]+);base64,(.*)$/s;
+const BLOBREF_URL_RE = /^blobref:([^;]+);([0-9a-f]+)$/;
 
 function bytesFromBase64(b64: string): number {
   const len = b64.length;
@@ -54,6 +66,8 @@ export function parseReadMediaOutput(output: string): ReadMediaSummary | null {
   let mimeType: string | undefined;
   let bytes: number | undefined;
   let url: string | undefined;
+  let base64: string | undefined;
+  let blobHash: string | undefined;
   let foundMedia = false;
 
   for (const raw of parsed) {
@@ -82,6 +96,13 @@ export function parseReadMediaOutput(output: string): ReadMediaSummary | null {
           if (data && data[1] !== undefined && data[2] !== undefined) {
             mimeType = data[1];
             bytes = bytesFromBase64(data[2]);
+            base64 = data[2];
+            continue;
+          }
+          const blobref = BLOBREF_URL_RE.exec(u);
+          if (blobref && blobref[1] !== undefined && blobref[2] !== undefined) {
+            mimeType = blobref[1];
+            blobHash = blobref[2];
           } else {
             url = u;
           }
@@ -97,6 +118,8 @@ export function parseReadMediaOutput(output: string): ReadMediaSummary | null {
   if (mimeType !== undefined) summary.mimeType = mimeType;
   if (bytes !== undefined) summary.bytes = bytes;
   if (url !== undefined) summary.url = url;
+  if (base64 !== undefined) summary.base64 = base64;
+  if (blobHash !== undefined) summary.blobHash = blobHash;
   return summary;
 }
 
@@ -124,13 +147,86 @@ export const readMediaChip: ChipProvider = (_toolCall, result) => {
   return `${summary.kind} (${meta.join(', ')})`;
 };
 
+const MAX_IMAGE_ROWS = 12;
+const MAX_IMAGE_WIDTH = 40;
+
+// Replayed records carry `blobref:` URLs instead of inline base64 (see the
+// header comment). The blob files live under the session directory, which the
+// TUI knows only after a session is bound, so KimiTUI injects it here. The
+// cache maps blob hash -> base64 (or undefined for a known miss); it resets
+// when the session changes.
+let mediaBlobSessionDir: string | undefined;
+const blobBase64Cache = new Map<string, string | undefined>();
+const MAX_BLOB_CACHE_ENTRIES = 64;
+
+export function setMediaBlobSessionDir(dir: string | undefined): void {
+  if (mediaBlobSessionDir === dir) return;
+  mediaBlobSessionDir = dir;
+  blobBase64Cache.clear();
+}
+
+function resolveBlobBase64(hash: string): string | undefined {
+  if (mediaBlobSessionDir === undefined) return undefined;
+  const cached = blobBase64Cache.get(hash);
+  if (cached !== undefined || blobBase64Cache.has(hash)) return cached;
+
+  let base64: string | undefined;
+  const agentsDir = join(mediaBlobSessionDir, 'agents');
+  try {
+    for (const agentDir of readdirSync(agentsDir)) {
+      const blobPath = join(agentsDir, agentDir, 'blobs', hash);
+      if (existsSync(blobPath)) {
+        base64 = readFileSync(blobPath).toString('base64');
+        break;
+      }
+    }
+  } catch {
+    base64 = undefined;
+  }
+
+  if (blobBase64Cache.size >= MAX_BLOB_CACHE_ENTRIES) {
+    const oldest = blobBase64Cache.keys().next().value;
+    if (oldest !== undefined) blobBase64Cache.delete(oldest);
+  }
+  blobBase64Cache.set(hash, base64);
+  return base64;
+}
+
+function renderInlineImage(base64: string, mimeType: string, filename?: string): Component {
+  const theme: ImageTheme = {
+    fallbackColor: (s: string) => currentTheme.fg('textDim', s),
+  };
+  return new Image(base64, mimeType, theme, {
+    maxHeightCells: MAX_IMAGE_ROWS,
+    maxWidthCells: MAX_IMAGE_WIDTH,
+    filename,
+  });
+}
+
 export const readMediaSummary: ResultRenderer = (toolCall, result, ctx) => {
   if (result.is_error) return renderTruncated(toolCall, result, ctx);
   const summary = parseReadMediaOutput(result.output);
   if (summary === null) return renderTruncated(toolCall, result, ctx);
-  if (!ctx.expanded) return [];
 
   const dim = (text: string): string => currentTheme.dim(text);
+  const caps = getCapabilities();
+  const supportsInline = caps.images === 'kitty' || caps.images === 'iterm2';
+  const inlineBase64 =
+    summary.base64 ??
+    (summary.blobHash !== undefined ? resolveBlobBase64(summary.blobHash) : undefined);
+  // The image renders in the collapsed body too: capped at MAX_IMAGE_ROWS it
+  // IS the compact preview, and gating it behind ctrl+o would make the
+  // feature invisible in the default view.
+  if (supportsInline && summary.kind === 'image' && inlineBase64 !== undefined) {
+    const out: Component[] = [];
+    if (ctx.expanded && summary.path !== undefined) {
+      out.push(new Text(`  ${dim(summary.path)}`, 0, 0));
+    }
+    out.push(renderInlineImage(inlineBase64, summary.mimeType ?? 'image/png', summary.path));
+    return out;
+  }
+
+  if (!ctx.expanded) return [];
   const out: Component[] = [];
   if (summary.path !== undefined) {
     out.push(new Text(`  ${dim(summary.path)}`, 0, 0));
