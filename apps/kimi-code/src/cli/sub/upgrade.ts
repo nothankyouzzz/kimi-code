@@ -1,13 +1,11 @@
-import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 
 import { log, type Logger } from '@moonshot-ai/kimi-code-sdk';
 import { track as trackTelemetry, type TelemetryProperties } from '@moonshot-ai/kimi-telemetry';
 
 import { INTERACTIVE_UPDATE_CHECK_TIMEOUT_MS } from '#/constant/app';
 
+import { resolveLocalUpgradePipeline } from '#/cli/update/local-pipeline';
 import { refreshUpdateCache } from '#/cli/update/refresh';
 import { selectUpdateTarget } from '#/cli/update/select';
 import { detectInstallSource } from '#/cli/update/source';
@@ -88,12 +86,9 @@ export async function handleUpgrade(
   // and the installed binary, then rebuilds and swaps only when necessary.
   // Pass the target release version if one is available, otherwise the current
   // version so the script can still re-apply/rebuild changed patches for the
-  // same release. KIMI_LOCAL_UPGRADE_SCRIPT overrides the path. Absent the
-  // script, fall through to the stock behavior.
-  const localUpgradePipeline =
-    process.env['KIMI_LOCAL_UPGRADE_SCRIPT'] ??
-    join(homedir(), '.kimi-code', 'upgrade-with-patches.sh');
-  if (existsSync(localUpgradePipeline)) {
+  // same release. Absent the script, fall through to the stock behavior.
+  const localUpgradePipeline = resolveLocalUpgradePipeline();
+  if (localUpgradePipeline !== null) {
     const versionToPass = target?.version ?? currentVersion;
     const result = spawnSync(localUpgradePipeline, [versionToPass], { stdio: 'inherit' });
     return result.status ?? 1;
