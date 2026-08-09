@@ -17,14 +17,25 @@
       "status": "active"
     },
     {
-      "branch": "feat/usage-weekly-api-value",
+      "branch": "fix/wezterm-inline-image",
+      "pr": 2539,
+      "status": "active"
+    },
+    {
+      "branch": "feat/read-media-inline-preview",
       "pr": null,
       "status": "active",
       "localOnly": true
     },
     {
-      "branch": "fix/wezterm-inline-image",
-      "pr": 2539,
+      "branch": "feat/math-inline-image",
+      "pr": null,
+      "status": "active",
+      "localOnly": true
+    },
+    {
+      "branch": "fix/sessionless-usage-login-hint",
+      "pr": 2752,
       "status": "active"
     }
   ]
