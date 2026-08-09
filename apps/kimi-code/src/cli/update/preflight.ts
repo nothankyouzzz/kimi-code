@@ -13,6 +13,7 @@ import { resolveCommandPath } from '#/utils/process/resolve-command';
 
 import { readUpdateCache } from './cache';
 import { tryAcquireUpdateInstallLock } from './install-lock';
+import { resolveLocalUpgradePipeline } from './local-pipeline';
 import { emptyUpdateInstallState, readUpdateInstallState, writeUpdateInstallState } from './install-state';
 import {
   CHANGELOG_URL,
@@ -582,14 +583,29 @@ export async function installUpdate(
   version: string,
   platform: NodeJS.Platform,
 ): Promise<void> {
+  // LOCAL-ONLY PATCH — never upstream: the patch pipeline performs the
+  // install itself (rebuild + atomic swap), so it takes precedence over the
+  // stock installer for every source. The pipeline path is an absolute script
+  // outside the workspace; skip PATH resolution so a malicious bare filename
+  // in the cwd is not substituted.
+  const localPipeline = resolveLocalUpgradePipeline();
   // installUpdate only runs after an explicit user choice (the `upgrade`
-  // command or the interactive prompt) — mark the stage as manual.
-  const spawnTarget = resolveInstallSpawn(source, version, platform, { manual: true });
+  // command or the interactive prompt) — mark the stage as manual so the
+  // startup swap applies it even when automatic updates are opted out via env.
+  const spawnTarget =
+    localPipeline !== null
+      ? {
+        resolvedCmd: platform === 'win32' ? `"${localPipeline}"` : localPipeline,
+        args: [version],
+        shell: platform === 'win32',
+      }
+      : resolveInstallSpawn(source, version, platform, { manual: true });
   if (spawnTarget === undefined) {
     throw new Error(
       `${spawnForSource(source, version, platform).cmd} was not found in PATH; cannot install the update`,
     );
   }
+
   await new Promise<void>((resolve, reject) => {
     // Windows package managers (npm/pnpm/yarn) are .cmd shims. Since the
     // CVE-2024-27980 fix, Node throws EINVAL when spawning a .cmd/.bat without
@@ -617,6 +633,7 @@ async function startBackgroundInstall(
   currentVersion: string,
   target: UpdateTarget,
   source: InstallSource,
+  localPipeline: string | null,
   platform: NodeJS.Platform,
   track: RunUpdatePreflightOptions['track'],
   logger: UpdateLogger,
@@ -662,7 +679,17 @@ async function startBackgroundInstall(
       source,
     });
 
-    const spawnTarget = resolveInstallSpawn(source, target.version, platform);
+    // LOCAL-ONLY PATCH — never upstream: with the patch pipeline present it
+    // runs detached in place of the stock installer; it is idempotent and
+    // swaps the binary atomically once the patched rebuild finishes.
+    const spawnTarget =
+      localPipeline !== null
+        ? {
+          resolvedCmd: platform === 'win32' ? `"${localPipeline}"` : localPipeline,
+          args: [target.version],
+          shell: platform === 'win32',
+        }
+        : resolveInstallSpawn(source, target.version, platform);
     let settled = false;
 
     const finish = (succeeded: boolean): void => {
@@ -748,7 +775,11 @@ async function tryStartAutomaticBackgroundInstall(
   logger: UpdateLogger,
   rolloutTelemetry: RolloutTelemetry,
 ): Promise<boolean> {
-  const sourceCanAutoInstall = canAutoInstall(source, platform);
+  // LOCAL-ONLY PATCH — never upstream: the pipeline handles any install
+  // source (it rebuilds instead of installing), so its presence alone makes
+  // the update auto-installable.
+  const localPipeline = resolveLocalUpgradePipeline();
+  const sourceCanAutoInstall = localPipeline !== null || canAutoInstall(source, platform);
   const autoInstallUpdates = sourceCanAutoInstall ? await shouldAutoInstallUpdates() : false;
   if (!autoInstallUpdates || !sourceCanAutoInstall) return false;
   if (failureAttemptsFor(installState, target) >= AUTO_INSTALL_FAILURE_PROMPT_THRESHOLD) {
@@ -760,6 +791,7 @@ async function tryStartAutomaticBackgroundInstall(
       currentVersion,
       target,
       source,
+      localPipeline,
       platform,
       track,
       logger,
@@ -845,6 +877,14 @@ export async function runUpdatePreflight(
       return 'continue';
     }
 
+    // LOCAL-ONLY PATCH — never upstream: when the patch pipeline exists it
+    // performs the install itself, so even sources that normally require a
+    // manual command (homebrew, native on win32) become prompt-installable,
+    // and the prompt shows the pipeline as the command.
+    const localPipeline = resolveLocalUpgradePipeline();
+    const effectiveDecision =
+      decision === 'manual-command' && localPipeline !== null ? 'prompt-install' : decision;
+
     if (
       await tryStartAutomaticBackgroundInstall(
         installState,
@@ -891,10 +931,13 @@ export async function runUpdatePreflight(
       return 'continue';
     }
 
-    const installCommand = installCommandFor(source, userVisibleTarget.version, platform);
-    trackUpdatePrompted(options.track, currentVersion, userVisibleTarget, source, decision, userVisibleRollout);
+    const installCommand =
+      localPipeline !== null
+        ? `${localPipeline} ${userVisibleTarget.version}`
+        : installCommandFor(source, userVisibleTarget.version, platform);
+    trackUpdatePrompted(options.track, currentVersion, userVisibleTarget, source, effectiveDecision, userVisibleRollout);
 
-    if (decision === 'manual-command') {
+    if (effectiveDecision === 'manual-command') {
       stdout.write(renderManualUpdateMessage(
         currentVersion,
         userVisibleTarget,

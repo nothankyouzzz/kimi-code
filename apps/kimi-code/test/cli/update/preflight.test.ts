@@ -34,6 +34,7 @@ const mocks = vi.hoisted(() => ({
   detectInstallSource: vi.fn(),
   promptForInstallChoice: vi.fn(),
   refreshUpdateCache: vi.fn(),
+  resolveLocalUpgradePipeline: vi.fn(),
   resolveUpdateDeviceId: vi.fn(),
   appendRolloutDecisionLog: vi.fn(),
   spawn: vi.fn(),
@@ -52,6 +53,10 @@ vi.mock('../../../src/cli/update/cache', () => ({
 
 vi.mock('../../../src/cli/update/install-lock', () => ({
   tryAcquireUpdateInstallLock: mocks.tryAcquireUpdateInstallLock,
+}));
+
+vi.mock('../../../src/cli/update/local-pipeline', () => ({
+  resolveLocalUpgradePipeline: mocks.resolveLocalUpgradePipeline,
 }));
 
 vi.mock('../../../src/cli/update/install-state', () => ({
@@ -245,6 +250,8 @@ describe('runUpdatePreflight', () => {
     mocks.readUpdateInstallState.mockResolvedValue(emptyUpdateInstallState());
     mocks.writeUpdateInstallState.mockResolvedValue(undefined);
     mocks.loadTuiConfig.mockResolvedValue(tuiConfig());
+    // Default to the stock behavior; pipeline tests opt in explicitly.
+    mocks.resolveLocalUpgradePipeline.mockReturnValue(null);
     mocks.resolveUpdateDeviceId.mockReturnValue('test-device');
     mocks.appendRolloutDecisionLog.mockResolvedValue(undefined);
     mocks.tryAcquireUpdateInstallLock.mockResolvedValue({
@@ -706,6 +713,51 @@ describe('runUpdatePreflight', () => {
         notifiedAt: null,
       }),
     }));
+  });
+
+  it('delegates the background auto-install to the local patch pipeline when present', async () => {
+    mocks.resolveLocalUpgradePipeline.mockReturnValue('/home/user/.kimi-code/upgrade-with-patches.sh');
+    mocks.readUpdateCache.mockResolvedValue(cacheWith('0.5.0'));
+    mocks.readUpdateInstallState.mockResolvedValue(installState());
+    mocks.refreshUpdateCache.mockResolvedValue(cacheWith('0.5.0'));
+    mocks.detectInstallSource.mockResolvedValue('npm-global');
+    mockSpawnExit(0);
+    const { options } = captureOutput();
+
+    await expect(runUpdatePreflight('0.4.0', options)).resolves.toBe('continue');
+    expect(promptForInstallChoice).not.toHaveBeenCalled();
+    expect(mocks.spawn).toHaveBeenCalledWith(
+      '/home/user/.kimi-code/upgrade-with-patches.sh',
+      ['0.5.0'],
+      { detached: true, stdio: 'ignore' },
+    );
+  });
+
+  it('homebrew: prompts and delegates the install to the local patch pipeline when present', async () => {
+    disableAutoInstall();
+    mocks.resolveLocalUpgradePipeline.mockReturnValue('/home/user/.kimi-code/upgrade-with-patches.sh');
+    mocks.readUpdateCache.mockResolvedValue(cacheWith('0.5.0'));
+    mocks.refreshUpdateCache.mockResolvedValue(cacheWith('0.5.0'));
+    mocks.detectInstallSource.mockResolvedValue('homebrew');
+    mocks.promptForInstallChoice.mockResolvedValue('install');
+    mockSpawnExit(0);
+    const { stdout, options } = captureOutput();
+
+    await expect(runUpdatePreflight('0.4.0', options)).resolves.toBe('exit');
+    // The pipeline rebuilds instead of installing, so even a normally
+    // manual-only source becomes prompt-installable through it.
+    expect(mocks.promptForInstallChoice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        installCommand: '/home/user/.kimi-code/upgrade-with-patches.sh 0.5.0',
+        installSource: 'homebrew',
+      }),
+    );
+    expect(mocks.spawn).toHaveBeenCalledWith(
+      '/home/user/.kimi-code/upgrade-with-patches.sh',
+      ['0.5.0'],
+      { stdio: 'inherit' },
+    );
+    expect(stdout.join('')).toContain('Updated @moonshot-ai/kimi-code to 0.5.0');
   });
 
   it('win32 background auto-update hides the console window', async () => {

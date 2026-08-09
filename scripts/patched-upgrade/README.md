@@ -5,9 +5,12 @@ upstream release plus local patch branches. This directory holds the code and
 is versioned on the `local/upgrade-hook` branch (pushed to the fork); the
 live copies used at runtime are in `~/.kimi-code/`.
 
-- `upgrade-with-patches.sh` — the pipeline. `kimi upgrade` (patched via this
-  same branch) delegates to `~/.kimi-code/upgrade-with-patches.sh` when it
-  exists. The script fast-forwards the local `main` to `upstream/main`,
+- `upgrade-with-patches.sh` — the pipeline. All update paths in the patched
+  CLI delegate to `~/.kimi-code/upgrade-with-patches.sh` when it exists:
+  `kimi upgrade`, the startup update prompt, and the automatic background
+  install all run the script instead of the stock installer (the startup
+  prompt shows the script as the install command). The script fast-forwards
+  the local `main` to `upstream/main`,
   gates on a merge-conflict check (every active patch branch must merge
   cleanly into `upstream/main`, simulated with `git merge-tree` — the
   branches are never modified), cherry-picks the patches onto the target
