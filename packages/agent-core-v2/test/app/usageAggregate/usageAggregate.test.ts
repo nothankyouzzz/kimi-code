@@ -4,8 +4,8 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { LifecycleScope } from '#/app/scopes';
 import {
-  LifecycleScope,
   ScopeActivation,
   _clearScopedRegistryForTests,
   registerScopedService,
@@ -15,6 +15,7 @@ import { ILogService } from '#/_base/log/log';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import {
   ISessionIndex,
+  type SessionCountQuery,
   type SessionListQuery,
   type SessionSummary,
 } from '#/app/sessionIndex/sessionIndex';
@@ -43,14 +44,18 @@ function usageRecord(model: string, time: number, tokens: Record<string, number>
 function stubIndex(summaries: readonly SessionSummary[]): ISessionIndex {
   return {
     _serviceBrand: undefined,
-    list: (query: SessionListQuery): Promise<Page<SessionSummary>> => {
+    prepare: async () => ({ state: 'uninitialized' as const, degradedCount: 0 }),
+    status: () => ({ state: 'uninitialized' as const, degradedCount: 0 }),
+    listRecent: (query: SessionListQuery): Promise<Page<SessionSummary>> => {
       const items = summaries.filter(
         (s) => query.includeArchived === true || !s.archived,
       );
       return Promise.resolve({ items });
     },
     get: (id: string) => Promise.resolve(summaries.find((s) => s.id === id)),
-    countActive: () => Promise.resolve(summaries.filter((s) => !s.archived).length),
+    count: (query: SessionCountQuery) =>
+      Promise.resolve(summaries.filter((s) => query.includeArchived === true || !s.archived).length),
+    remove: async () => {},
   };
 }
 

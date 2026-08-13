@@ -37,7 +37,7 @@ export class UsageAggregateService implements IUsageAggregateService {
 
     const sessionsScope = this.bootstrap.scope('sessions');
     // Archived sessions still burned quota inside the window, so they count.
-    const page = await this.index.list({ includeArchived: true });
+    const page = await this.index.listRecent({ includeArchived: true });
     for (const summary of page.items) {
       const sessionDir = sessionDirOf(
         this.bootstrap.homeDir,
