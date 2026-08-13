@@ -2,7 +2,7 @@
  * Renders a user message in the transcript.
  */
 
-import { Spacer, Text, truncateToWidth, visibleWidth, type Component } from '@moonshot-ai/pi-tui';
+import { isImageLine, Spacer, Text, truncateToWidth, visibleWidth, type Component } from '@moonshot-ai/pi-tui';
 
 import { ImageThumbnail } from '#/tui/components/media/image-thumbnail';
 import { USER_MESSAGE_BULLET } from '#/tui/constant/symbols';
@@ -94,10 +94,6 @@ export class UserMessageComponent implements Component {
     }
     return rendered;
   }
-}
-
-function isImageLine(line: string): boolean {
-  return line.includes('\u001B_G') || line.includes('\u001B]1337;File=');
 }
 
 /**

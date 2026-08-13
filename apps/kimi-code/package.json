@@ -114,6 +114,8 @@
     "node": ">=22.19.0"
   },
   "dependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "mathjax-full": "^3.2.2",
     "qrcode": "^1.5.4",
     "ws": "^8.18.0"
   }

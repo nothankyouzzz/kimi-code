@@ -27,6 +27,16 @@ const clipboardSubpackageByTarget = Object.freeze({
   'win32-x64': '@mariozechner/clipboard-win32-x64-msvc',
 });
 
+// resvg rasterizes MathJax SVG output for inline $$...$$ math images.
+const resvgSubpackageByTarget = Object.freeze({
+  'darwin-arm64': '@resvg/resvg-js-darwin-arm64',
+  'darwin-x64': '@resvg/resvg-js-darwin-x64',
+  'linux-arm64': '@resvg/resvg-js-linux-arm64-gnu',
+  'linux-x64': '@resvg/resvg-js-linux-x64-gnu',
+  'win32-arm64': '@resvg/resvg-js-win32-arm64-msvc',
+  'win32-x64': '@resvg/resvg-js-win32-x64-msvc',
+});
+
 // pi-tui ships platform-specific native helpers (no Linux build):
 // - darwin: Shift-modifier detection for Terminal.app Shift+Enter
 // - win32: enable ENABLE_VIRTUAL_TERMINAL_INPUT so Shift+Tab is distinguishable
@@ -72,6 +82,18 @@ export const nativeDeps = Object.freeze([
     name: (target) => clipboardSubpackageByTarget[target],
     collect: 'native-files',
     parent: 'clipboard-host',
+  },
+  {
+    id: 'resvg-host',
+    name: () => '@resvg/resvg-js',
+    collect: 'js-only',
+    parent: null,
+  },
+  {
+    id: 'resvg-target',
+    name: (target) => resvgSubpackageByTarget[target],
+    collect: 'native-files',
+    parent: 'resvg-host',
   },
   {
     id: 'pi-tui',

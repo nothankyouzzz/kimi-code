@@ -6,6 +6,7 @@ import { AssistantMessageComponent } from '#/tui/components/messages/assistant-m
 import { STATUS_BULLET } from '#/tui/constant/symbols';
 import { createMarkdownTheme } from '#/tui/theme/pi-tui-theme';
 import { setMarkdownRenderLatex } from '#/tui/utils/markdown-options';
+import { renderMathBlockImage } from '#/tui/utils/math-image';
 
 import { captureProcessWrite } from '../../../helpers/process';
 
@@ -16,6 +17,11 @@ vi.mock('cli-highlight', async () => {
     highlight: vi.fn(actual.highlight),
   };
 });
+
+vi.mock('#/tui/utils/math-image', () => ({
+  latexToUnicode: () => undefined,
+  renderMathBlockImage: vi.fn(() => undefined),
+}));
 
 function strip(text: string): string {
   return text
@@ -154,5 +160,22 @@ describe('AssistantMessageComponent', () => {
     } finally {
       setMarkdownRenderLatex(true);
     }
+  });
+
+  it('does not truncate inline image sequences produced by display math', () => {
+    // A truncated OSC1337 sequence leaves WezTerm painting a black placeholder
+    // box at the requested size, so image lines must pass through untouched.
+    const payload = 'A'.repeat(1500);
+    const imageLine = '\u001B]1337;File=inline=1:' + payload + '\u0007';
+    vi.mocked(renderMathBlockImage).mockReturnValue([imageLine]);
+
+    const component = new AssistantMessageComponent();
+    component.updateContent('before\n\n$$\nx\n$$\n\nafter');
+
+    const lines = component.render(40);
+    const rendered = lines.find((line) => line.includes('1337;File='));
+    expect(rendered).toBeDefined();
+    expect(rendered).toContain(payload);
+    expect(rendered).not.toContain('…');
   });
 });

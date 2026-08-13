@@ -9,11 +9,20 @@
  */
 
 import type { MarkdownTheme, EditorTheme } from '@moonshot-ai/pi-tui';
+import { renderLatex } from '@moonshot-ai/pi-tui';
 import chalk from 'chalk';
 import { highlight, supportsLanguage } from 'cli-highlight';
 
 import { currentTheme } from './theme';
 import { codeHighlightTheme } from './highlight-theme';
+import { latexToUnicode, renderMathBlockImage } from '../utils/math-image';
+
+// The pi-tui built-in renderLatex is the better inline renderer for most
+// input (smart fraction parentheses, kept spacing, lim/binom/matrix layouts),
+// but it silently drops constructs that carry meaning: \mathcal{L} collapses
+// to "L", \overbrace{x} to "x". When the source uses any of these, hand the
+// line to the MathJax MathML walker instead, which preserves them.
+const MATHJAX_ONLY_TEX = /\\(?:mathcal|mathfrak|mathscr|overbrace|underbrace|color)\b/;
 
 // pi-tui's renderer emits literal "### " / "#### " / ... markers for h3-h6
 // headings (h1/h2 are rendered without the `#` prefix). The prefix arrives
@@ -57,6 +66,18 @@ export function createMarkdownTheme(options?: { transient?: boolean }): Markdown
       } catch {
         return code.split('\n');
       }
+    },
+    // $$...$$ → inline image (kitty/iTerm2); $...$ → Unicode approximation.
+    // Both return undefined when they can't render, falling back to source.
+    renderMathBlock: (tex, width) => renderMathBlockImage(tex, width),
+    renderMathInline: (tex) => {
+      // Prefer the built-in renderer — its structural output (fractions,
+      // roots, spacing, lim/binom/matrix) beats the MathML walker — but let
+      // the walker take over when the built-in would drop information.
+      const upstream = renderLatex(tex);
+      if (upstream === undefined) return latexToUnicode(tex);
+      if (MATHJAX_ONLY_TEX.test(tex)) return latexToUnicode(tex) ?? upstream;
+      return upstream;
     },
   };
 }

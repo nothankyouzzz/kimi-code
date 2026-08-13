@@ -5,7 +5,7 @@
  * to align after the bullet.
  */
 
-import { Container, Markdown, truncateToWidth, visibleWidth, type Component } from '@moonshot-ai/pi-tui';
+import { Container, isImageLine, Markdown, truncateToWidth, visibleWidth, type Component } from '@moonshot-ai/pi-tui';
 
 import { MESSAGE_INDENT } from '#/tui/constant/rendering';
 import { STATUS_BULLET } from '#/tui/constant/symbols';
@@ -125,7 +125,18 @@ export class AssistantMessageComponent implements Component {
         i === 0 && this.showBullet ? currentTheme.fg('text', STATUS_BULLET) : MESSAGE_INDENT;
       lines.push(p + contentLines[i]);
     }
-    const rendered = markOsc133Zone(lines.map((line) => truncateToWidth(line, safeWidth, '…')));
+    const rendered = markOsc133Zone(
+      lines.map((line) => {
+        // Inline image sequences (Kitty / iTerm2, e.g. rendered $$ math) carry
+        // their own placement information and have zero visible width, but
+        // truncateToWidth treats the embedded base64 payload as visible text and
+        // would chop the escape sequence in half — WezTerm then paints a black
+        // placeholder box at the requested size. Skip truncation for those
+        // lines; the image itself already respects maxWidthCells.
+        if (isImageLine(line)) return line;
+        return truncateToWidth(line, safeWidth, '…');
+      }),
+    );
     if (isRenderCacheEnabled()) {
       this.renderCache = { width: safeWidth, lines: rendered };
     }
