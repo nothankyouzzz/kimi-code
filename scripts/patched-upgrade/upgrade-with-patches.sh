@@ -24,11 +24,18 @@
 # conflict — in the merge check or during cherry-pick — fails fast, stops
 # the build, and leaves the installed binary untouched.
 #
+# The merge check is text-only; before the heavy build the script type-checks
+# every package the patches touched (tsc --noEmit per package tsconfig), so a
+# patch referencing a module upstream renamed or moved fails here with the
+# responsible patch named, instead of as an opaque rolldown error. SKIP_TYPECHECK=1
+# bypasses the gate.
+#
 # Env overrides:
 #   KIMI_PATCH_REPO   repo working tree (default ~/workspace/kimi-code)
 #   KIMI_PATCH_STATE  registry/state file (default ~/.kimi-code/local-patches.json)
 #   DRY_RUN=1         stop before the build step, print the plan only
 #   FORCE=1           rebuild even when state matches the target release
+#   SKIP_TYPECHECK=1  skip the pre-build type-check gate
 set -euo pipefail
 
 REPO="${KIMI_PATCH_REPO:-$HOME/workspace/kimi-code}"
@@ -286,6 +293,44 @@ fi
 # --- 6. build -----------------------------------------------------------------
 log "building (this takes a few minutes)"
 pnpm install --quiet
+
+# The merge-conflict gate (step 2) only detects textual conflicts; it is
+# blind to semantic breakage such as upstream renaming a module that a
+# patch still references (TS2307 / UNRESOLVED_IMPORT at build time). Type-
+# check every package whose files the patches touched, so such a failure is
+# caught here — named per package and attributed to the responsible patch
+# branch — instead of surfacing as a bare rolldown error during the heavy
+# build. Workspace packages export source `.ts` directly, so `tsc` needs no
+# build step. SKIP_TYPECHECK=1 bypasses the gate.
+if [ "${SKIP_TYPECHECK:-0}" != "1" ]; then
+  log "type-checking packages touched by patches (SKIP_TYPECHECK=1 to bypass)"
+  TSC_FAILED=0
+  while IFS= read -r PKG; do
+    [ -f "$PKG/tsconfig.json" ] || continue
+    if ! TSC_OUT=$(cd "$PKG" && pnpm exec tsc -p tsconfig.json --noEmit 2>&1); then
+      log "type check FAILED in $PKG:"
+      printf '%s\n' "$TSC_OUT" | tail -25
+      for i in $(seq 0 $((PATCH_COUNT - 1))); do
+        T_BRANCH=$(jq -r ".patches[$i].branch" "$STATE_FILE")
+        T_STATUS=$(jq -r ".patches[$i].status" "$STATE_FILE")
+        [ "$T_STATUS" = "active" ] || continue
+        T_SHA=$(git rev-parse --verify --quiet "refs/heads/$T_BRANCH" \
+          || git rev-parse --verify --quiet "refs/remotes/origin/$T_BRANCH" \
+          || echo "missing")
+        if [ "$T_SHA" != "missing" ] && [ -n "$(git diff --name-only "$RELEASE_COMMIT" "$T_SHA" -- "$PKG")" ]; then
+          log "  likely responsible patch: $T_BRANCH (touches $PKG)"
+        fi
+      done
+      TSC_FAILED=1
+    fi
+  done < <(git diff --name-only "$RELEASE_COMMIT" HEAD \
+    | sed -n 's@^\(packages/[^/]*\|apps/[^/]*\)/.*@\1@p' \
+    | sort -u)
+  if [ "$TSC_FAILED" = "1" ]; then
+    die "type check failed in package(s) touched by patches — fix the responsible patch branch (likely a stale import after an upstream rename), then rerun. Binary untouched."
+  fi
+fi
+
 pnpm --filter @moonshot-ai/kimi-code run build >/dev/null
 pnpm --filter @moonshot-ai/kimi-code run build:native:sea >/dev/null
 NEW_BIN="$REPO/apps/kimi-code/dist-native/bin/linux-x64/kimi"

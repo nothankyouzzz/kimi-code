@@ -14,7 +14,10 @@ live copies used at runtime are in `~/.kimi-code/`.
   gates on a merge-conflict check (every active patch branch must merge
   cleanly into `upstream/main`, simulated with `git merge-tree` — the
   branches are never modified), cherry-picks the patches onto the target
-  release tag, rebuilds, and atomically swaps `~/.kimi-code/bin/kimi`.
+  release tag, type-checks the packages the patches touched (a patch
+  referencing a module upstream renamed or moved fails here with the
+  responsible patch named, instead of as a bare build error), rebuilds, and
+  atomically swaps `~/.kimi-code/bin/kimi`.
   Idempotent: no rebuild when the release AND the patch fingerprint are
   unchanged. Conflict policy: conflicts confined to generated docs manifests
   (`docs/state-manifest.d.ts`, whose embedded compiler symbol ids drift on
@@ -68,6 +71,7 @@ kimi upgrade                           # rebuilds the patched binary
 
 - `KIMI_LOCAL_UPGRADE_SCRIPT` overrides the script path the CLI hook uses;
   `KIMI_PATCH_REPO` / `KIMI_PATCH_STATE` override the script's defaults;
-  `DRY_RUN=1` prints the plan without building; `FORCE=1` rebuilds anyway.
+  `DRY_RUN=1` prints the plan without building; `FORCE=1` rebuilds anyway;
+  `SKIP_TYPECHECK=1` bypasses the pre-build type-check gate.
 - The script fails fast when `node --version` does not match `.nvmrc` — the
   SEA build needs the repo-pinned Node, not an arbitrary system Node.
