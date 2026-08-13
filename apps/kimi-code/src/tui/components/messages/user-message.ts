@@ -3,6 +3,7 @@
  */
 
 import {
+  isImageLine,
   Spacer,
   Text,
   truncateToWidth,
@@ -116,10 +117,6 @@ export class UserMessageComponent implements Component {
     }
     return rendered;
   }
-}
-
-function isImageLine(line: string): boolean {
-  return line.includes('\u001B_G') || line.includes('\u001B]1337;File=');
 }
 
 /**
