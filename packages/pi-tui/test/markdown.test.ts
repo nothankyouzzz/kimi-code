@@ -1785,3 +1785,94 @@ describe("Markdown negative width safety", () => {
 		assert.doesNotThrow(() => markdown.render(-1));
 	});
 });
+
+describe("Markdown math", () => {
+	it("calls renderMathBlock for display math at top level", () => {
+		const calls: string[] = [];
+		const theme = {
+			...defaultMarkdownTheme,
+			renderMathBlock: (tex: string) => {
+				calls.push(tex);
+				return ["MATH_IMAGE"];
+			},
+		};
+		const markdown = new Markdown("Before\n\n$$\nE = mc^2\n$$\n\nAfter", 0, 0, theme);
+		const lines = markdown.render(80).map((line) => stripAnsi(line).trimEnd());
+
+		assert.deepStrictEqual(calls, ["E = mc^2"]);
+		assert.ok(lines.includes("MATH_IMAGE"));
+	});
+
+	it("falls back to Unicode math without a hook", () => {
+		const markdown = new Markdown("$$\nE = mc^2\n$$", 0, 0, defaultMarkdownTheme);
+		const lines = markdown.render(80).map((line) => stripAnsi(line).trimEnd());
+
+		assert.ok(lines.some((line) => line.includes("E = mc²")));
+	});
+
+	it("falls back to Unicode math when the block hook returns undefined", () => {
+		const theme = { ...defaultMarkdownTheme, renderMathBlock: () => undefined };
+		const markdown = new Markdown("$$\nx^2\n$$", 0, 0, theme);
+		const lines = markdown.render(80).map((line) => stripAnsi(line).trimEnd());
+
+		assert.ok(lines.some((line) => line.includes("x²")));
+	});
+
+	it("treats an unclosed $$ block as plain text", () => {
+		const theme = { ...defaultMarkdownTheme, renderMathBlock: () => ["IMG"] };
+		const markdown = new Markdown("$$\nE = mc^2", 0, 0, theme);
+		const lines = markdown.render(80).map(stripAnsi);
+
+		assert.ok(lines.some((line) => line.includes("$$")));
+		assert.ok(!lines.includes("IMG"));
+	});
+
+	it("does not call the block hook inside blockquotes", () => {
+		let called = false;
+		const theme = {
+			...defaultMarkdownTheme,
+			renderMathBlock: () => {
+				called = true;
+				return ["IMG"];
+			},
+		};
+		const markdown = new Markdown("> $$\n> x^2\n> $$", 0, 0, theme);
+		const lines = markdown.render(80).map((line) => stripAnsi(line).trimEnd());
+
+		assert.strictEqual(called, false);
+		assert.ok(lines.some((line) => line.includes("x²")));
+	});
+
+	it("leaves currency amounts alone", () => {
+		const theme = { ...defaultMarkdownTheme, renderMathInline: () => "UNI" };
+		const markdown = new Markdown("Costs $5 and $10 today", 0, 0, theme);
+		const lines = markdown.render(80).map(stripAnsi);
+
+		assert.ok(lines.some((line) => line.includes("$5 and $10")));
+	});
+
+	it("calls renderMathInline for inline math", () => {
+		const seen: string[] = [];
+		const theme = {
+			...defaultMarkdownTheme,
+			renderMathInline: (tex: string) => {
+				seen.push(tex);
+				return "x²";
+			},
+		};
+		const markdown = new Markdown("So $x^2$ works", 0, 0, theme);
+		const lines = markdown.render(80).map(stripAnsi);
+
+		assert.deepStrictEqual(seen, ["x^2"]);
+		assert.ok(lines.some((line) => line.includes("x²")));
+	});
+
+	it("renders Unicode math when the inline hook returns undefined", () => {
+		const theme = { ...defaultMarkdownTheme, renderMathInline: () => undefined };
+		const markdown = new Markdown("So $x^2$ works", 0, 0, theme);
+		const lines = markdown.render(80).map(stripAnsi);
+
+		assert.ok(lines.some((line) => line.includes("x²")));
+		assert.ok(!lines.some((line) => line.includes("$x^2$")));
+	});
+});

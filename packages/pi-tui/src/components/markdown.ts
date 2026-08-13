@@ -307,6 +307,20 @@ export interface MarkdownTheme {
 	highlightCode?: (code: string, lang?: string) => string[];
 	/** Prefix applied to each rendered code block line (default: "  ") */
 	codeBlockIndent?: string;
+	/**
+	 * Render a top-level display-math block ($$...$$) to terminal lines —
+	 * typically an inline image. Return undefined (or leave unset) to fall
+	 * back to rendering the LaTeX source as a code block. Math nested inside
+	 * lists/blockquotes always falls back, since image lines can't carry
+	 * list/quote prefixes.
+	 */
+	renderMathBlock?: (tex: string, width: number) => string[] | undefined;
+	/**
+	 * Render inline math ($...$) as plain text — typically a Unicode
+	 * approximation. Return undefined (or leave unset) to show the inner
+	 * source without the $ delimiters.
+	 */
+	renderMathInline?: (tex: string) => string | undefined;
 }
 
 export interface MarkdownOptions {
@@ -548,6 +562,7 @@ export class Markdown implements Component {
 		width: number,
 		nextTokenType?: string,
 		styleContext?: InlineStyleContext,
+		topLevel = true,
 	): string[] {
 		const lines: string[] = [];
 
@@ -596,11 +611,23 @@ export class Markdown implements Component {
 
 			case "latexBlock": {
 				const latexToken = token as LatexToken;
-				const rendered =
+				const fallback =
 					!latexToken.pending && this.options.renderLatex !== false
 						? (renderLatex(latexToken.text, { display: true }) ?? latexToken.raw.trim())
 						: latexToken.raw.trim();
-				for (const line of rendered.split("\n")) {
+				// $$...$$ at the top level may be rendered as an inline image
+				// (MathJax → SVG → resvg) via the theme hook; nested in lists
+				// /blockquotes image lines can't carry list/quote prefixes, and
+				// an unclosed stream is still being typed, so both always fall
+				// back. A hook returning undefined falls through to the
+				// built-in Unicode approximation, and `renderLatex: false`
+				// disables the hook along with the built-in renderer.
+				const rendered =
+					topLevel && !latexToken.pending && this.options.renderLatex !== false
+						? (this.theme.renderMathBlock?.(latexToken.text, width) ?? fallback)
+						: fallback;
+				const renderedLines = Array.isArray(rendered) ? rendered : rendered.split("\n");
+				for (const line of renderedLines) {
 					lines.push(this.applyDefaultStyle(line));
 				}
 				if (nextTokenType && nextTokenType !== "space") {
@@ -672,7 +699,7 @@ export class Markdown implements Component {
 					const quoteToken = quoteTokens[i]!;
 					const nextQuoteToken = quoteTokens[i + 1];
 					renderedQuoteLines.push(
-						...this.renderToken(quoteToken, quoteContentWidth, nextQuoteToken?.type, quoteInlineStyleContext),
+						...this.renderToken(quoteToken, quoteContentWidth, nextQuoteToken?.type, quoteInlineStyleContext, false),
 					);
 				}
 
@@ -736,10 +763,19 @@ export class Markdown implements Component {
 			switch (token.type) {
 				case "latex": {
 					const latexToken = token as LatexToken;
-					const rendered =
+					const fallback =
 						!latexToken.pending && this.options.renderLatex !== false
 							? (renderLatex(latexToken.text) ?? latexToken.raw)
 							: latexToken.raw;
+					// $...$ inline math: the theme hook (Unicode approximation)
+					// wins; returning undefined falls through to the built-in
+					// renderer or the raw source. `renderLatex: false`
+					// disables the hook along with the built-in renderer, and
+					// an unclosed stream is still being typed.
+					const rendered =
+						!latexToken.pending && this.options.renderLatex !== false
+							? (this.theme.renderMathInline?.(latexToken.text) ?? fallback)
+							: fallback;
 					result += applyTextWithNewlines(rendered);
 					break;
 				}
@@ -875,7 +911,7 @@ export class Markdown implements Component {
 					continue;
 				}
 
-				const itemLines = this.renderToken(itemToken, itemWidth, undefined, styleContext);
+				const itemLines = this.renderToken(itemToken, itemWidth, undefined, styleContext, false);
 				for (const line of itemLines) {
 					for (const wrappedLine of wrapTextWithAnsi(line, itemWidth)) {
 						const linePrefix = renderedAnyLine ? continuationPrefix : firstPrefix;
