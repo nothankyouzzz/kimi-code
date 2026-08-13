@@ -5,7 +5,7 @@
 
 import { z } from 'zod';
 
-import { tokenUsageSchema } from '../agent/rpc.js';
+import { tokenUsageSchema } from '../agent/schemas.js';
 import type { ServiceContract } from '../types.js';
 
 export const usageAggregateSchema = z.object({
