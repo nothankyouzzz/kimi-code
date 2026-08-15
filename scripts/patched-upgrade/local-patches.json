@@ -34,9 +34,21 @@
       "localOnly": true
     },
     {
+      "branch": "feat/session-title-model",
+      "pr": null,
+      "status": "active",
+      "localOnly": true
+    },
+    {
       "branch": "fix/sessionless-usage-login-hint",
       "pr": 2752,
       "status": "active"
     }
-  ]
+  ],
+  "state": {
+    "baseRelease": "0.36.1",
+    "builtHash": "81e30930c9eb423a3837f9f96193e8965092e67ccec834e68093a3a8236a12e0",
+    "patchesHash": "cf8426fd2adcee96f4a54e818cdcef5266a97d1964cd80c68aede0d6851acb62",
+    "builtAt": "2026-08-15T20:09:57+08:00"
+  }
 }
