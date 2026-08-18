@@ -52,6 +52,24 @@ TAG_PREFIX="@moonshot-ai/kimi-code@"
 log() { printf '[kimi-patched-upgrade] %s\n' "$*"; }
 die() { printf '[kimi-patched-upgrade] ERROR: %s\n' "$*" >&2; exit 1; }
 
+# Resolve a patch branch to a ref the pipeline can read: prefer the local
+# branch (local-only patches never leave the machine), otherwise fetch and
+# fall back to origin/<branch>. Prints the ref on success; exits nonzero when
+# the branch exists nowhere (the caller turns that into a die).
+resolve_patch_ref() {
+  local branch="$1"
+  if git show-ref --verify --quiet "refs/heads/$branch"; then
+    printf '%s\n' "$branch"
+    return 0
+  fi
+  git fetch origin "$branch" --quiet
+  if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+    printf '%s\n' "origin/$branch"
+    return 0
+  fi
+  return 1
+}
+
 # When a cherry-pick stops on conflicts that are ALL in generated docs
 # manifests (state-manifest.d.ts), resolve them by taking the patch side
 # ("theirs" is the commit being replayed) and return 0. The file carries
@@ -224,7 +242,7 @@ fi
 PATCH_COUNT=$(jq '.patches | length' "$STATE_FILE")
 CHECKED=()
 CONFLICT_BLOCKS=()
-for i in $(seq 0 $((PATCH_COUNT - 1))); do
+for ((i = 0; i < PATCH_COUNT; i++)); do
   BRANCH=$(jq -r ".patches[$i].branch" "$STATE_FILE")
   PR=$(jq -r ".patches[$i].pr" "$STATE_FILE")
   STATUS=$(jq -r ".patches[$i].status" "$STATE_FILE")
@@ -242,15 +260,9 @@ for i in $(seq 0 $((PATCH_COUNT - 1))); do
     fi
   fi
 
-  # Prefer the local branch (local-only patches never leave the machine);
-  # otherwise fetch the branch from origin.
-  if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
-    REF="$BRANCH"
-  else
-    git fetch origin "$BRANCH" --quiet
-    git show-ref --verify --quiet "refs/remotes/origin/$BRANCH" \
-      || die "patch branch $BRANCH not found locally or on origin"
-    REF="origin/$BRANCH"
+  # Resolve the branch ref (local branch preferred, origin fallback).
+  if ! REF=$(resolve_patch_ref "$BRANCH"); then
+    die "patch branch $BRANCH not found locally or on origin"
   fi
   # Already merged into upstream/main — trivially conflict-free; the apply
   # phase below will report it as "already upstream".
@@ -269,7 +281,7 @@ $CONFLICTED")
   }
   CHECKED+=("$BRANCH")
 done
-if [ ${#CONFLICT_BLOCKS[@]} -ne 0 ]; then
+if [ "${#CONFLICT_BLOCKS[@]}" -ne 0 ]; then
   die "$(printf '%s\n' "${CONFLICT_BLOCKS[@]}")
 
 Resolve each branch (merge or rebase it onto upstream/main yourself), then rerun. Binary untouched."
@@ -281,7 +293,7 @@ fi
 # new/changed patch with an unchanged release is still a different build, so
 # the idempotency check must compare this.
 FINGERPRINT_INPUT="$TARGET_VERSION"
-for i in $(seq 0 $((PATCH_COUNT - 1))); do
+for ((i = 0; i < PATCH_COUNT; i++)); do
   F_BRANCH=$(jq -r ".patches[$i].branch" "$STATE_FILE")
   F_STATUS=$(jq -r ".patches[$i].status" "$STATE_FILE")
   [ "$F_STATUS" = "active" ] || continue
@@ -319,17 +331,15 @@ SKIPPED=()
 # which then conflicts with later patches or re-applies add/delete pairs.
 # Dedup them by sha across the whole run.
 declare -A PICKED_SHAS=()
-for i in $(seq 0 $((PATCH_COUNT - 1))); do
+for ((i = 0; i < PATCH_COUNT; i++)); do
   BRANCH=$(jq -r ".patches[$i].branch" "$STATE_FILE")
   STATUS=$(jq -r ".patches[$i].status" "$STATE_FILE")
   [ "$STATUS" = "active" ] || { SKIPPED+=("$BRANCH ($STATUS)"); continue; }
 
   # Resolve the same ref the conflict check used: local branch preferred,
   # origin fallback.
-  if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
-    REF="$BRANCH"
-  else
-    REF="origin/$BRANCH"
+  if ! REF=$(resolve_patch_ref "$BRANCH"); then
+    die "patch branch $BRANCH not found locally or on origin"
   fi
   # Every commit the branch carries that the release does not (patch-id
   # comparison, so upstream squash-merges are detected). This intentionally
@@ -370,19 +380,19 @@ for i in $(seq 0 $((PATCH_COUNT - 1))); do
 done
 
 # --- 5. report / dry run ------------------------------------------------------
-if [ ${#APPLIED[@]} -eq 0 ]; then
+if [ "${#APPLIED[@]}" -eq 0 ]; then
   log "patches applied: none"
 else
   log "patches applied:"
   for p in "${APPLIED[@]}"; do log "  + $p"; done
 fi
-if [ ${#SKIPPED[@]} -eq 0 ]; then
+if [ "${#SKIPPED[@]}" -eq 0 ]; then
   log "patches skipped: none"
 else
   log "patches skipped:"
   for p in "${SKIPPED[@]}"; do log "  - $p"; done
 fi
-if [ ${#CHECKED[@]} -ne 0 ]; then
+if [ "${#CHECKED[@]}" -ne 0 ]; then
   log "merge-conflict check vs upstream/main passed for ${#CHECKED[@]} patch branch(es)"
 fi
 if [ "${DRY_RUN:-0}" = "1" ]; then
@@ -410,7 +420,7 @@ if [ "${SKIP_TYPECHECK:-0}" != "1" ]; then
     if ! TSC_OUT=$(cd "$PKG" && pnpm exec tsc -p tsconfig.json --noEmit 2>&1); then
       log "type check FAILED in $PKG:"
       printf '%s\n' "$TSC_OUT" | tail -25
-      for i in $(seq 0 $((PATCH_COUNT - 1))); do
+      for ((i = 0; i < PATCH_COUNT; i++)); do
         T_BRANCH=$(jq -r ".patches[$i].branch" "$STATE_FILE")
         T_STATUS=$(jq -r ".patches[$i].status" "$STATE_FILE")
         [ "$T_STATUS" = "active" ] || continue
