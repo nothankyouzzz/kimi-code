@@ -14,10 +14,13 @@
 # patch that can no longer land upstream stops the build instead of being
 # baked into the binary. The check collects every non-tolerated conflict and
 # reports all offending branches in one run, so a broken upgrade names the
-# full fix list instead of dying on the first hit. Idempotent: exits without
-# rebuilding when the recorded state already matches the target release AND
-# the patch fingerprint (active branches + their head commits) — a new or
-# updated patch forces a rebuild even when the release is unchanged.
+# full fix list instead of dying on the first hit. A self-check at startup
+# compares the live hook script and companion skill against their versioned
+# source on local/upgrade-hook (warn by default; KIMI_UPGRADE_STRICT_SELFCHECK=1
+# makes a live-script drift fatal — the skill only ever warns). Idempotent:
+# exits without rebuilding when the recorded state already matches the target
+# release AND the patch fingerprint (active branches + their head commits) — a
+# new or updated patch forces a rebuild even when the release is unchanged.
 #
 # Conflict policy: conflicts confined to generated docs manifests
 # (docs/state-manifest.d.ts — it embeds compiler-internal unique-symbol ids
@@ -96,6 +99,48 @@ GIT_DIR=$(git rev-parse --git-dir)
 PREV_REF=$(git symbolic-ref --short -q HEAD || git rev-parse HEAD)
 restore_ref() { git checkout --quiet "$PREV_REF" 2>/dev/null || true; }
 trap restore_ref EXIT
+
+# --- 0. self-check: live copies vs their versioned source ----------------------
+# The live hook script and companion skill must match the versions committed on
+# the local/upgrade-hook branch (git hash-object vs the blobs on the branch, so
+# the comparison is exact regardless of the branch currently checked out).
+# Default: warn and continue — the drift is surfaced, the upgrade proceeds.
+# KIMI_UPGRADE_STRICT_SELFCHECK=1 turns a live-SCRIPT drift into a hard stop
+# (the script is what is about to run); the SKILL never blocks — it does not
+# affect the build. A versioned source missing from the branch is a config
+# error, not a drift: die. The live patch registry (local-patches.json) is
+# deliberately live-only and is not checked.
+SELF_HOOK_BLOB_REF=$(git show-ref --verify --quiet refs/heads/local/upgrade-hook && echo refs/heads/local/upgrade-hook \
+  || { git fetch origin local/upgrade-hook --quiet 2>/dev/null; \
+       git show-ref --verify --quiet refs/remotes/origin/local/upgrade-hook \
+         && echo refs/remotes/origin/local/upgrade-hook || echo missing; })
+if [ "$SELF_HOOK_BLOB_REF" = "missing" ]; then
+  log "self-check skipped: local/upgrade-hook ref not found locally or on origin"
+else
+  selfcheck_live_vs_repo() {
+    local label="$1" live_path="$2" repo_path="$3" block="$4"
+    local live_sha repo_sha
+    if [ -f "$live_path" ]; then
+      live_sha=$(git hash-object "$live_path")
+    else
+      live_sha="<absent>"
+    fi
+    repo_sha=$(git rev-parse "$SELF_HOOK_BLOB_REF:$repo_path" 2>/dev/null) || {
+      die "self-check: $repo_path does not exist on $SELF_HOOK_BLOB_REF — fix the branch, then rerun"
+    }
+    if [ "$live_sha" != "$repo_sha" ]; then
+      local sync_hint="FORCE=1 bash $REPO/scripts/patched-upgrade/install.sh"
+      if [ "$block" = "strict" ] && [ "${KIMI_UPGRADE_STRICT_SELFCHECK:-0}" = "1" ]; then
+        die "self-check: $label ($live_path) differs from the versioned source ($SELF_HOOK_BLOB_REF:$repo_path). Refresh it with '$sync_hint', then rerun. Binary untouched."
+      fi
+      log "self-check: $label ($live_path) differs from the versioned source ($SELF_HOOK_BLOB_REF:$repo_path) — refresh it with '$sync_hint'"
+    fi
+  }
+  selfcheck_live_vs_repo "hook script" "$HOME/.kimi-code/upgrade-with-patches.sh" \
+    "scripts/patched-upgrade/upgrade-with-patches.sh" strict
+  selfcheck_live_vs_repo "companion skill" "$HOME/.kimi-code/skills/resolve-upgrade-conflicts/SKILL.md" \
+    "scripts/patched-upgrade/skills/resolve-upgrade-conflicts/SKILL.md" warn
+fi
 
 # --- 1. resolve target version ---------------------------------------------
 TARGET_VERSION="${1:-}"
