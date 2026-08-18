@@ -105,11 +105,12 @@ trap restore_ref EXIT
 # the local/upgrade-hook branch (git hash-object vs the blobs on the branch, so
 # the comparison is exact regardless of the branch currently checked out).
 # Default: warn and continue — the drift is surfaced, the upgrade proceeds.
-# KIMI_UPGRADE_STRICT_SELFCHECK=1 turns a live-SCRIPT drift into a hard stop
-# (the script is what is about to run); the SKILL never blocks — it does not
-# affect the build. A versioned source missing from the branch is a config
-# error, not a drift: die. The live patch registry (local-patches.json) is
-# deliberately live-only and is not checked.
+# KIMI_UPGRADE_STRICT_SELFCHECK=1 turns a live-SCRIPT or REGISTRY drift into a
+# hard stop (both decide what this run builds); the SKILL never blocks — it
+# does not affect the build. A versioned source missing from the branch is a
+# config error, not a drift: die. The registry comparison covers the patch
+# branch set + each branch's `pr` only — `status` mutations (merged marks)
+# and per-machine `state` are legitimate live data and are excluded.
 SELF_HOOK_BLOB_REF=$(git show-ref --verify --quiet refs/heads/local/upgrade-hook && echo refs/heads/local/upgrade-hook \
   || { git fetch origin local/upgrade-hook --quiet 2>/dev/null; \
        git show-ref --verify --quiet refs/remotes/origin/local/upgrade-hook \
@@ -140,6 +141,51 @@ else
     "scripts/patched-upgrade/upgrade-with-patches.sh" strict
   selfcheck_live_vs_repo "companion skill" "$HOME/.kimi-code/skills/resolve-upgrade-conflicts/SKILL.md" \
     "scripts/patched-upgrade/skills/resolve-upgrade-conflicts/SKILL.md" warn
+
+  # The live patch registry must mirror the bundled one's patch SET plus each
+  # branch's `pr`. Two legitimate live mutations are excluded so they never
+  # read as drift: `status` (the pipeline marks entries `merged` once their PR
+  # merges) and `state` (per-machine build bookkeeping, deliberately not
+  # versioned). A missing branch on either side, or a pr mismatch, is real
+  # drift — the same warn/strict tiers as the script itself, because the
+  # registry decides what gets built.
+  selfcheck_live_vs_bundled_registry() {
+    local live_path="$1"
+    local tmp
+    tmp=$(mktemp)
+    git show "$SELF_HOOK_BLOB_REF:scripts/patched-upgrade/local-patches.json" > "$tmp" 2>/dev/null || {
+      rm -f "$tmp"
+      die "self-check: bundled patch registry missing on $SELF_HOOK_BLOB_REF; fix the branch, then rerun"
+    }
+    local drift=""
+    if [ ! -f "$live_path" ]; then
+      drift="live registry is absent"
+    else
+      local live_branches repo_branches only_live only_repo pr_diffs b lp rp
+      live_branches=$(jq -r '.patches[].branch' "$live_path" | sort -u)
+      repo_branches=$(jq -r '.patches[].branch' "$tmp" | sort -u)
+      only_live=$(comm -23 <(printf '%s\n' "$live_branches") <(printf '%s\n' "$repo_branches") | paste -sd, -)
+      only_repo=$(comm -13 <(printf '%s\n' "$live_branches") <(printf '%s\n' "$repo_branches") | paste -sd, -)
+      pr_diffs=""
+      while IFS= read -r b; do
+        [ -z "$b" ] && continue
+        lp=$(jq -r --arg b "$b" '.patches[] | select(.branch == $b) | .pr // "null"' "$live_path")
+        rp=$(jq -r --arg b "$b" '.patches[] | select(.branch == $b) | .pr // "null"' "$tmp")
+        [ "$lp" != "$rp" ] && pr_diffs="${pr_diffs}${b}(repo=${rp},live=${lp}) "
+      done < <(comm -12 <(printf '%s\n' "$live_branches") <(printf '%s\n' "$repo_branches"))
+      [ -n "$only_live" ] && drift="$drift only-in-live: $only_live;"
+      [ -n "$only_repo" ] && drift="$drift only-in-repo: $only_repo;"
+      [ -n "$pr_diffs" ] && drift="$drift pr-differs: ${pr_diffs% };"
+    fi
+    rm -f "$tmp"
+    if [ -n "$drift" ]; then
+      if [ "${KIMI_UPGRADE_STRICT_SELFCHECK:-0}" = "1" ]; then
+        die "self-check: patch registry drift ($live_path):$drift Refresh it with 'FORCE=1 bash $REPO/scripts/patched-upgrade/install.sh', then rerun. Binary untouched."
+      fi
+      log "self-check: patch registry drift ($live_path):$drift refresh it with 'FORCE=1 bash $REPO/scripts/patched-upgrade/install.sh'"
+    fi
+  }
+  selfcheck_live_vs_bundled_registry "$STATE_FILE"
 fi
 
 # --- 1. resolve target version ---------------------------------------------
