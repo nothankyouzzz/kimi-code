@@ -26,8 +26,16 @@ live copies used at runtime are in `~/.kimi-code/`.
   leaves the installed binary untouched. The gate reports every offending
   branch at once — a single run names the full fix list rather than dying on
   the first conflict.
-- `install.sh` — installs the script into `~/.kimi-code/` (keeps an existing
-  copy unless `FORCE=1`) and seeds an empty patch registry if none exists.
+- `install.sh` — installs the script and the companion skill into
+  `~/.kimi-code/` (keeps an existing copy unless `FORCE=1`) and seeds an
+  empty patch registry if none exists.
+- `skills/resolve-upgrade-conflicts/SKILL.md` — the companion skill
+  (`resolve-upgrade-conflicts`, user scope at `<KIMI_CODE_HOME>/skills/`):
+  an agent-side playbook for resolving the conflicts the pipeline reports —
+  diagnosis (enumerate every conflicting branch), the rebase-and-adapt
+  workflow with a triage table (resolve silently vs report vs stop and ask),
+  and the merge-tree + type-check verification gates that must pass before
+  re-running the pipeline.
 
 ## The patch registry
 
