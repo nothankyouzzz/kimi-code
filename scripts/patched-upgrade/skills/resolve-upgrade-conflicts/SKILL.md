@@ -11,6 +11,11 @@ The local kimi binary is built from an upstream release plus local patch branche
 
 The pipeline exits with:
 
+- `ERROR: self-check: ... differs from the versioned source ...` — the live
+  hook script or its companion skill drifted from the source of truth on
+  `local/upgrade-hook`. Fix with `FORCE=1 bash <repo>/scripts/patched-upgrade/install.sh`
+  (warn-only by default; the script variant is fatal under
+  `KIMI_UPGRADE_STRICT_SELFCHECK=1`, the skill never blocks).
 - `ERROR: patch <branch> has merge conflicts vs upstream/main: <paths>` — gate failed. The message reports **every** offending branch, one block per branch.
 - `conflict applying <branch> onto <tag>` — a cherry-pick stopped mid-apply.
 
@@ -19,7 +24,7 @@ Both mean one or more patch branches need a rebase onto `upstream/main` (§3) pl
 Inputs and conventions:
 
 - Registry: `~/.kimi-code/local-patches.json` — `patches[]` (branch / pr / status) plus per-machine `state`. The pipeline owns this file; never hand-edit it.
-- Env: `KIMI_PATCH_REPO` (repo path, default `~/workspace/kimi-code`), `KIMI_PATCH_STATE`, `DRY_RUN=1` (stop before build), `FORCE=1` (rebuild even when state matches), `SKIP_TYPECHECK=1`.
+- Env: `KIMI_PATCH_REPO` (repo path, default `~/workspace/kimi-code`), `KIMI_PATCH_STATE`, `DRY_RUN=1` (stop before build), `FORCE=1` (rebuild even when state matches), `SKIP_TYPECHECK=1`, `KIMI_UPGRADE_STRICT_SELFCHECK=1` (make live-script drift fatal; the skill mismatch still only warns).
 - Merged-PR handling is automatic: an entry whose upstream `pr` is MERGED gets marked `merged` and skipped by the pipeline — do not rebase it.
 
 ## 2. Diagnose — enumerate every conflicting branch
