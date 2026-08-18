@@ -12,10 +12,12 @@
 # every active patch branch must merge cleanly into upstream/main (simulated
 # with git merge-tree — the branches themselves are never modified), so a
 # patch that can no longer land upstream stops the build instead of being
-# baked into the binary. Idempotent: exits without rebuilding when the
-# recorded state already matches the target release AND the patch fingerprint
-# (active branches + their head commits) — a new or updated patch forces a
-# rebuild even when the release is unchanged.
+# baked into the binary. The check collects every non-tolerated conflict and
+# reports all offending branches in one run, so a broken upgrade names the
+# full fix list instead of dying on the first hit. Idempotent: exits without
+# rebuilding when the recorded state already matches the target release AND
+# the patch fingerprint (active branches + their head commits) — a new or
+# updated patch forces a rebuild even when the release is unchanged.
 #
 # Conflict policy: conflicts confined to generated docs manifests
 # (docs/state-manifest.d.ts — it embeds compiler-internal unique-symbol ids
@@ -124,10 +126,13 @@ fi
 # this is exactly what the open PR's mergeability check will see. The check
 # is a pure merge simulation (git merge-tree --write-tree): the branches and
 # the working tree are never touched. Conflicts confined to generated docs
-# manifests are tolerated (see try_manifest_autoresolve); anything else
-# fails fast and stops the build.
+# manifests are tolerated (see try_manifest_autoresolve). Every non-tolerated
+# conflict is collected and reported at once — dying on the first hit would
+# force a fix-rebase-rerun cycle per branch, when a single run can name all
+# of them.
 PATCH_COUNT=$(jq '.patches | length' "$STATE_FILE")
 CHECKED=()
+CONFLICT_BLOCKS=()
 for i in $(seq 0 $((PATCH_COUNT - 1))); do
   BRANCH=$(jq -r ".patches[$i].branch" "$STATE_FILE")
   PR=$(jq -r ".patches[$i].pr" "$STATE_FILE")
@@ -167,13 +172,17 @@ for i in $(seq 0 $((PATCH_COUNT - 1))); do
     if [ -n "$CONFLICTED" ] && ! printf '%s\n' "$CONFLICTED" | grep -qv 'docs/state-manifest\.d\.ts$'; then
       log "patch $BRANCH: only generated-manifest conflicts vs upstream/main — tolerated"
     else
-      die "patch $BRANCH has merge conflicts vs upstream/main:
-$CONFLICTED
-Resolve the branch (merge or rebase it onto upstream/main yourself), then rerun. Binary untouched."
+      CONFLICT_BLOCKS+=("patch $BRANCH has merge conflicts vs upstream/main:
+$CONFLICTED")
     fi
   }
   CHECKED+=("$BRANCH")
 done
+if [ ${#CONFLICT_BLOCKS[@]} -ne 0 ]; then
+  die "$(printf '%s\n' "${CONFLICT_BLOCKS[@]}")
+
+Resolve each branch (merge or rebase it onto upstream/main yourself), then rerun. Binary untouched."
+fi
 
 # Fingerprint of the effective patch inputs: the target release plus, for each
 # active patch, the branch name and its head commit (extras pulled in by git

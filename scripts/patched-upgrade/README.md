@@ -23,7 +23,9 @@ live copies used at runtime are in `~/.kimi-code/`.
   (`docs/state-manifest.d.ts`, whose embedded compiler symbol ids drift on
   every regeneration) are tolerated in the check and auto-resolved during
   cherry-pick by taking the patch side; any other conflict fails fast and
-  leaves the installed binary untouched.
+  leaves the installed binary untouched. The gate reports every offending
+  branch at once — a single run names the full fix list rather than dying on
+  the first conflict.
 - `install.sh` — installs the script into `~/.kimi-code/` (keeps an existing
   copy unless `FORCE=1`) and seeds an empty patch registry if none exists.
 
