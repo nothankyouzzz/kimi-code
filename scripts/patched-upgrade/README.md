@@ -25,7 +25,12 @@ live copies used at runtime are in `~/.kimi-code/`.
   cherry-pick by taking the patch side; any other conflict fails fast and
   leaves the installed binary untouched. The gate reports every offending
   branch at once — a single run names the full fix list rather than dying on
-  the first conflict.
+  the first conflict. A startup self-check also compares the live hook script
+  and companion skill against their versioned source on `local/upgrade-hook`
+  (`git hash-object` vs the branch blobs): drift warns by default, and
+  `KIMI_UPGRADE_STRICT_SELFCHECK=1` makes a live-script drift fatal (the
+  skill mismatch only ever warns — it does not affect the build). Refresh
+  either with `FORCE=1 bash install.sh`.
 - `install.sh` — installs the script and the companion skill into
   `~/.kimi-code/` (keeps an existing copy unless `FORCE=1`) and seeds an
   empty patch registry if none exists.
