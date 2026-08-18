@@ -34,6 +34,9 @@ live copies used at runtime are in `~/.kimi-code/`.
 - `install.sh` — installs the script and the companion skill into
   `~/.kimi-code/` (keeps an existing copy unless `FORCE=1`) and seeds an
   empty patch registry if none exists.
+- `test/smoke.sh` — standalone smoke tests running the pipeline under
+  `DRY_RUN=1` against temporary state files and fixture branches to assert
+  the clean path, the multi-conflict gate, and self-check drift tiers.
 - `skills/resolve-upgrade-conflicts/SKILL.md` — the companion skill
   (`resolve-upgrade-conflicts`, user scope at `<KIMI_CODE_HOME>/skills/`):
   an agent-side playbook for resolving the conflicts the pipeline reports —
