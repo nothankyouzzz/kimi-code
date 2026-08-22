@@ -36,14 +36,14 @@
 # bypasses the gate.
 #
 # Env overrides:
-#   KIMI_PATCH_REPO   repo working tree (default ~/workspace/kimi-code)
+#   KIMI_PATCH_REPO   repo working tree (default ~/kimi-code)
 #   KIMI_PATCH_STATE  registry/state file (default ~/.kimi-code/local-patches.json)
 #   DRY_RUN=1         stop before the build step, print the plan only
 #   FORCE=1           rebuild even when state matches the target release
 #   SKIP_TYPECHECK=1  skip the pre-build type-check gate
 set -euo pipefail
 
-REPO="${KIMI_PATCH_REPO:-$HOME/workspace/kimi-code}"
+REPO="${KIMI_PATCH_REPO:-$HOME/kimi-code}"
 STATE_FILE="${KIMI_PATCH_STATE:-$HOME/.kimi-code/local-patches.json}"
 BIN_DIR="$HOME/.kimi-code/bin"
 UPSTREAM_REPO="MoonshotAI/kimi-code"
