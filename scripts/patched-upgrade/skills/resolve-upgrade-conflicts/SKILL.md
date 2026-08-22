@@ -30,7 +30,7 @@ Both mean one or more patch branches need a rebase onto `upstream/main` (§3) pl
 Inputs and conventions:
 
 - Registry: `~/.kimi-code/local-patches.json` — `patches[]` (branch / pr / status) plus per-machine `state`. The pipeline owns this file; never hand-edit it.
-- Env: `KIMI_PATCH_REPO` (repo path, default `~/kimi-code`), `KIMI_PATCH_STATE`, `DRY_RUN=1` (stop before build), `FORCE=1` (rebuild even when state matches), `SKIP_TYPECHECK=1`, `KIMI_UPGRADE_STRICT_SELFCHECK=1` (make live-script drift fatal; the skill mismatch still only warns).
+- Env: `KIMI_PATCH_REPO` (repo path override; default: `.state.repoPath`, recorded by install.sh), `KIMI_PATCH_STATE`, `DRY_RUN=1` (stop before build), `FORCE=1` (rebuild even when state matches), `SKIP_TYPECHECK=1`, `KIMI_UPGRADE_STRICT_SELFCHECK=1` (make live-script drift fatal; the skill mismatch still only warns).
 - Merged-PR handling is automatic: an entry whose upstream `pr` is MERGED gets marked `merged` and skipped by the pipeline — do not rebase it.
 
 ## 2. Diagnose — enumerate every conflicting branch

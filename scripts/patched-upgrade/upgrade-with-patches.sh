@@ -36,15 +36,19 @@
 # bypasses the gate.
 #
 # Env overrides:
-#   KIMI_PATCH_REPO   repo working tree (default ~/kimi-code)
+#   KIMI_PATCH_REPO   repo working tree (default: .state.repoPath from the patch registry)
 #   KIMI_PATCH_STATE  registry/state file (default ~/.kimi-code/local-patches.json)
 #   DRY_RUN=1         stop before the build step, print the plan only
 #   FORCE=1           rebuild even when state matches the target release
 #   SKIP_TYPECHECK=1  skip the pre-build type-check gate
 set -euo pipefail
 
-REPO="${KIMI_PATCH_REPO:-$HOME/kimi-code}"
 STATE_FILE="${KIMI_PATCH_STATE:-$HOME/.kimi-code/local-patches.json}"
+REPO="${KIMI_PATCH_REPO:-}"
+if [ -z "$REPO" ] && [ -f "$STATE_FILE" ]; then
+  REPO=$(jq -r '.state.repoPath // empty' "$STATE_FILE" 2>/dev/null || true)
+fi
+[ -n "$REPO" ] || die "repo path not configured: set KIMI_PATCH_REPO, or re-run the patched-upgrade install.sh so it records .state.repoPath"
 BIN_DIR="$HOME/.kimi-code/bin"
 UPSTREAM_REPO="MoonshotAI/kimi-code"
 TAG_PREFIX="@moonshot-ai/kimi-code@"
@@ -88,7 +92,7 @@ try_manifest_autoresolve() {
   printf '%s\n' "$unmerged" | xargs git add --
 }
 
-[ -d "$REPO/.git" ] || die "repo not found at $REPO (set KIMI_PATCH_REPO)"
+[ -d "$REPO/.git" ] || die "repo not found at $REPO (set KIMI_PATCH_REPO or fix .state.repoPath)"
 [ -f "$STATE_FILE" ] || die "registry not found at $STATE_FILE"
 command -v gh >/dev/null || die "gh CLI is required"
 command -v jq >/dev/null || die "jq is required"
@@ -121,7 +125,11 @@ trap restore_ref EXIT
 # --- 0. self-check: live copies vs their versioned source ----------------------
 # The live hook script and companion skill must match the versions committed on
 # the local/upgrade-hook branch (git hash-object vs the blobs on the branch, so
-# the comparison is exact regardless of the branch currently checked out).
+# the comparison is exact regardless of the branch currently checked out). A
+# mismatch is classified by direction: when the live blob exists in the branch
+# history the branch simply advanced (stale install — reinstall); when it does
+# not, the live copy carries unversioned local modifications (reconcile them).
+# The message names the matching remedy plus the diff stat.
 # Default: warn and continue — the drift is surfaced, the upgrade proceeds.
 # KIMI_UPGRADE_STRICT_SELFCHECK=1 turns a live-SCRIPT or REGISTRY drift into a
 # hard stop (both decide what this run builds); the SKILL never blocks — it
@@ -138,7 +146,7 @@ if [ "$SELF_HOOK_BLOB_REF" = "missing" ]; then
 else
   selfcheck_live_vs_repo() {
     local label="$1" live_path="$2" repo_path="$3" block="$4"
-    local live_sha repo_sha
+    local live_sha repo_sha direction remedy stat
     if [ -f "$live_path" ]; then
       live_sha=$(git hash-object "$live_path")
     else
@@ -148,11 +156,30 @@ else
       die "self-check: $repo_path does not exist on $SELF_HOOK_BLOB_REF — fix the branch, then rerun"
     }
     if [ "$live_sha" != "$repo_sha" ]; then
-      local sync_hint="FORCE=1 bash $REPO/scripts/patched-upgrade/install.sh"
-      if [ "$block" = "strict" ] && [ "${KIMI_UPGRADE_STRICT_SELFCHECK:-0}" = "1" ]; then
-        die "self-check: $label ($live_path) differs from the versioned source ($SELF_HOOK_BLOB_REF:$repo_path). Refresh it with '$sync_hint', then rerun. Binary untouched."
+      # Direction: a live blob that exists in the branch history is an older
+      # versioned state (stale install — the branch advanced); anything else is
+      # an unversioned local modification. The remedy differs, so name it.
+      if [ "$live_sha" != "<absent>" ] \
+        && git rev-list --objects "$SELF_HOOK_BLOB_REF" -- "$repo_path" 2>/dev/null \
+           | awk '{print $1}' | grep -qx "$live_sha"; then
+        direction="the branch advanced but the live copy is stale"
+        remedy="reinstall it with 'git checkout $SELF_HOOK_BLOB_REF -- scripts/patched-upgrade && bash scripts/patched-upgrade/install.sh'"
+      else
+        direction="the live copy carries unversioned local modifications"
+        remedy="reconcile them: commit the change back to $SELF_HOOK_BLOB_REF, or restore the versioned file (git show $SELF_HOOK_BLOB_REF:$repo_path > $live_path)"
       fi
-      log "self-check: $label ($live_path) differs from the versioned source ($SELF_HOOK_BLOB_REF:$repo_path) — refresh it with '$sync_hint'"
+      if [ -f "$live_path" ]; then
+        # git diff --no-index exits 1 when the files differ (they always do
+        # here); the `|| true` keeps that from tripping `set -e` in the
+        # command substitution.
+        stat=$(git diff --no-index --stat <(git show "$SELF_HOOK_BLOB_REF:$repo_path" 2>/dev/null) "$live_path" | tail -1 || true)
+      else
+        stat="live file absent"
+      fi
+      if [ "$block" = "strict" ] && [ "${KIMI_UPGRADE_STRICT_SELFCHECK:-0}" = "1" ]; then
+        die "self-check: $label ($live_path) differs from the versioned source ($SELF_HOOK_BLOB_REF:$repo_path) — $direction. $remedy. Then rerun. Binary untouched."
+      fi
+      log "self-check: $label ($live_path) differs from the versioned source ($SELF_HOOK_BLOB_REF:$repo_path) — $direction. $remedy ($stat)"
     fi
   }
   selfcheck_live_vs_repo "hook script" "$HOME/.kimi-code/upgrade-with-patches.sh" \
@@ -198,9 +225,9 @@ else
     rm -f "$tmp"
     if [ -n "$drift" ]; then
       if [ "${KIMI_UPGRADE_STRICT_SELFCHECK:-0}" = "1" ]; then
-        die "self-check: patch registry drift ($live_path):$drift Refresh it with 'FORCE=1 bash $REPO/scripts/patched-upgrade/install.sh', then rerun. Binary untouched."
+        die "self-check: patch registry drift ($live_path):$drift Refresh it with 'git checkout $SELF_HOOK_BLOB_REF -- scripts/patched-upgrade && bash scripts/patched-upgrade/install.sh', then rerun. Binary untouched."
       fi
-      log "self-check: patch registry drift ($live_path):$drift refresh it with 'FORCE=1 bash $REPO/scripts/patched-upgrade/install.sh'"
+      log "self-check: patch registry drift ($live_path):$drift refresh it with 'git checkout $SELF_HOOK_BLOB_REF -- scripts/patched-upgrade && bash scripts/patched-upgrade/install.sh'"
     fi
   }
   selfcheck_live_vs_bundled_registry "$STATE_FILE"
