@@ -35,3 +35,12 @@ if [ -e "$DEST_DIR/local-patches.json" ]; then
 fi
 cp "$SRC_DIR/local-patches.json" "$DEST_DIR/local-patches.json"
 echo "installed $DEST_DIR/local-patches.json"
+
+# Record the repo this checkout belongs to. The pipeline resolves its build
+# workspace from `.state.repoPath` (env KIMI_PATCH_REPO overrides). It lives in
+# `state`, which the upgrade self-check deliberately excludes as per-machine
+# data, so the versioned hook script never carries machine-specific paths.
+REPO_ROOT="$(cd "$SRC_DIR/../.." && pwd)"
+TMP="$(mktemp)"
+jq --arg rp "$REPO_ROOT" '.state.repoPath = $rp' "$DEST_DIR/local-patches.json" > "$TMP" && mv "$TMP" "$DEST_DIR/local-patches.json"
+echo "recorded repo path $REPO_ROOT in $DEST_DIR/local-patches.json (.state.repoPath)"

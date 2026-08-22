@@ -19,7 +19,9 @@ pass() { echo "  PASS: $*"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $*" >&2; FAIL=$((FAIL + 1)); }
 
 TMP_DIR="$(mktemp -d /tmp/kimi-upgrade-smoke.XXXXXX)"
+START_BRANCH="$(git -C "$REPO_DIR" branch --show-current)"
 cleanup() {
+  git -C "$REPO_DIR" checkout -q "$START_BRANCH" 2>/dev/null || true
   git -C "$REPO_DIR" branch -D test/smoke-fake-1 test/smoke-fake-2 2>/dev/null || true
   rm -rf "$TMP_DIR"
 }
@@ -55,19 +57,26 @@ else
   fi
 fi
 
-# 3. Self-check: registry missing branch warns by default, dies under strict
+# 3. Self-check: registry missing branch warns by default, dies under strict.
+# Isolated: a pristine HOME carries exact copies of the branch's hook+skill, so
+# only the registry drifts — the live install may legitimately lag the branch
+# head, which would otherwise trip the hook check first.
 echo "3. self-check: registry drift"
 TMP_REGISTRY="$TMP_DIR/patches.json"
 jq 'del(.patches[] | select(.branch == "fix/wsl-clipboard-bmp"))' "$LIVE_STATE" > "$TMP_REGISTRY"
+mkdir -p "$TMP_DIR/.kimi-code/skills/resolve-upgrade-conflicts"
+cp "$PIPELINE" "$TMP_DIR/.kimi-code/upgrade-with-patches.sh"
+chmod +x "$TMP_DIR/.kimi-code/upgrade-with-patches.sh"
+cp "$SCRIPT_DIR/../skills/resolve-upgrade-conflicts/SKILL.md" "$TMP_DIR/.kimi-code/skills/resolve-upgrade-conflicts/SKILL.md"
 
-OUT=$(KIMI_PATCH_REPO="$REPO_DIR" KIMI_PATCH_STATE="$TMP_REGISTRY" DRY_RUN=1 bash "$PIPELINE" 2>&1 || true)
+OUT=$(HOME="$TMP_DIR" KIMI_PATCH_REPO="$REPO_DIR" KIMI_PATCH_STATE="$TMP_REGISTRY" DRY_RUN=1 bash "$PIPELINE" 2>&1 || true)
 if printf '%s\n' "$OUT" | grep -q "only-in-repo: fix/wsl-clipboard-bmp"; then
   pass "registry drift warns under default mode"
 else
   fail "registry drift did not warn: $OUT"
 fi
 
-if OUT=$(KIMI_PATCH_REPO="$REPO_DIR" KIMI_PATCH_STATE="$TMP_REGISTRY" KIMI_UPGRADE_STRICT_SELFCHECK=1 DRY_RUN=1 \
+if OUT=$(HOME="$TMP_DIR" KIMI_PATCH_REPO="$REPO_DIR" KIMI_PATCH_STATE="$TMP_REGISTRY" KIMI_UPGRADE_STRICT_SELFCHECK=1 DRY_RUN=1 \
     bash "$PIPELINE" 2>&1); then
   fail "strict self-check succeeded on drifted registry"
 else
@@ -81,16 +90,23 @@ fi
 # 4. Multi-conflict gate: reports all conflicting branches at once
 echo "4. multi-conflict gate: reports all branches in one run"
 git -C "$REPO_DIR" branch -D test/smoke-fake-1 test/smoke-fake-2 2>/dev/null || true
-# Create two fixture branches whose upstream/main counterpart has real changes:
-# 1. bumps package.json version to a conflicting value
+# Two fixture branches guaranteed to conflict with upstream/main whatever
+# upstream changed: each is based on upstream/main~4 and clobbers a file that
+# upstream modified between main~4 and main — a full-file rewrite overlaps any
+# region upstream touched, so the 3-way merge conflicts by construction.
+CONFLICT_FILES=($(git -C "$REPO_DIR" diff --name-only --diff-filter=M upstream/main~4 upstream/main | head -2))
+[ "${#CONFLICT_FILES[@]}" -ge 2 ] || {
+  echo "FAIL: cannot build conflicting fixtures (need >=2 upstream-modified files between main~4..main)" >&2
+  exit 1
+}
+C1="${CONFLICT_FILES[0]}"
+C2="${CONFLICT_FILES[1]}"
 git -C "$REPO_DIR" checkout -q -b test/smoke-fake-1 upstream/main~4
-sed -i 's/"version": "0.37.1"/"version": "9.9.9"/' "$REPO_DIR/apps/kimi-code/package.json"
-git -C "$REPO_DIR" commit -qam "fake 1"
-# 2. rewrites the changelog top header (upstream added a release entry at line 9)
+printf 'smoke fixture rewrite 1 — force a merge conflict vs upstream/main\n' > "$REPO_DIR/$C1"
+git -C "$REPO_DIR" commit -qam "fake 1 (clobber $C1)"
 git -C "$REPO_DIR" checkout -q -b test/smoke-fake-2 upstream/main~4
-sed -i '/^#/d' "$REPO_DIR/docs/en/release-notes/changelog.md"
-sed -i '1i # Fake conflict 2' "$REPO_DIR/docs/en/release-notes/changelog.md"
-git -C "$REPO_DIR" commit -qam "fake 2"
+printf 'smoke fixture rewrite 2 — force a merge conflict vs upstream/main\n' > "$REPO_DIR/$C2"
+git -C "$REPO_DIR" commit -qam "fake 2 (clobber $C2)"
 git -C "$REPO_DIR" checkout -q local/upgrade-hook
 
 TMP_MULTI_REGISTRY="$TMP_DIR/multi.json"
