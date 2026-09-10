@@ -8,6 +8,8 @@ import { IAgentPromptService } from '#/agent/prompt/prompt';
 import type { ContentPart } from '#human/llm/message';
 import { IAgentTitlePromptSource } from '#/session/sessionTitle/agentTitlePromptSource';
 import { AgentTitlePromptSourceService } from '#/session/sessionTitle/agentTitlePromptSourceService';
+import type { WireRecord } from '#/wire/record';
+import { IWireService } from '#/wire/wire';
 
 const USER_ORIGIN: ContextMessage['origin'] = { kind: 'user' };
 
@@ -33,20 +35,58 @@ function toolMessage(id: string, text: string): ContextMessage {
   return { id, role: 'tool', content: [{ type: 'text', text }], toolCalls: [] };
 }
 
+function userAppendMessage(id: string, text: string): WireRecord {
+  return { type: 'context.append_message', message: userMessage(id, text), time: 1 };
+}
+
+function assistantTextSteps(stepUuid: string, ...texts: string[]): WireRecord[] {
+  const records: WireRecord[] = [
+    { type: 'context.append_loop_event', event: { type: 'step.begin', uuid: stepUuid }, time: 2 },
+  ];
+  for (let index = 0; index < texts.length; index++) {
+    records.push({
+      type: 'context.append_loop_event',
+      event: {
+        type: 'content.part',
+        stepUuid,
+        part: { type: 'text', text: texts[index]! },
+        uuid: `part-${index}`,
+      },
+      time: 3,
+    });
+  }
+  records.push({
+    type: 'context.append_loop_event',
+    event: { type: 'step.end', uuid: stepUuid },
+    time: 4,
+  });
+  return records;
+}
+
 describe('AgentTitlePromptSource', () => {
   let disposables: DisposableStore;
   let ix: TestInstantiationService;
   let liveMessages: readonly ContextMessage[];
   let queue: ReturnType<IAgentPromptService['list']>;
+  let journal: WireRecord[];
+  let journalFails: boolean;
 
   beforeEach(() => {
     liveMessages = [];
     queue = { active: undefined, pending: [], launching: false };
+    journal = [];
+    journalFails = false;
     disposables = new DisposableStore();
     ix = createServices(disposables, {
       additionalServices: (reg) => {
         reg.definePartialInstance(IAgentContextMemoryService, { get: () => liveMessages });
         reg.definePartialInstance(IAgentPromptService, { list: () => queue });
+        reg.definePartialInstance(IWireService, {
+          readJournal: async function* () {
+            if (journalFails) throw new Error('journal read failed');
+            yield* journal;
+          },
+        });
         reg.define(IAgentTitlePromptSource, AgentTitlePromptSourceService);
       },
     });
@@ -255,5 +295,70 @@ describe('AgentTitlePromptSource', () => {
 
     liveMessages = [];
     await expect(ix.get(IAgentTitlePromptSource).digestExcerpt()).resolves.toEqual({ turns: [] });
+  });
+
+  it('reconstructs user prompts from the journal when the live context is empty', async () => {
+    journal = [userAppendMessage('du1', '磁盘里的开场'), ...assistantTextSteps('s1', '第一段回答')];
+
+    await expect(ix.get(IAgentTitlePromptSource).firstUserPrompts(3)).resolves.toEqual([
+      '磁盘里的开场',
+    ]);
+  });
+
+  it('completes a first-turn excerpt from the journal when memory keeps no assistant text', async () => {
+    liveMessages = [userMessage('u1', '内存里的问题')];
+    journal = [userAppendMessage('du1', '磁盘里的问题'), ...assistantTextSteps('s1', '磁盘里的回答')];
+
+    await expect(ix.get(IAgentTitlePromptSource).firstTurnExcerpt()).resolves.toEqual({
+      user: '磁盘里的问题',
+      assistant: '磁盘里的回答',
+    });
+  });
+
+  it('prefers the live context when it already holds a complete first turn', async () => {
+    liveMessages = [
+      userMessage('u1', '内存里的问题'),
+      assistantMessage('a1', [{ type: 'text', text: '内存里的回答' }]),
+    ];
+    journal = [userAppendMessage('du1', '磁盘里的问题'), ...assistantTextSteps('s1', '磁盘里的回答')];
+
+    await expect(ix.get(IAgentTitlePromptSource).firstTurnExcerpt()).resolves.toEqual({
+      user: '内存里的问题',
+      assistant: '内存里的回答',
+    });
+  });
+
+  it('digestExcerpt falls back to the journal when memory lacks the latest assistant text', async () => {
+    liveMessages = [userMessage('u1', '内存里的问题')];
+    journal = [userAppendMessage('du1', '磁盘里的问题'), ...assistantTextSteps('s1', '磁盘里的回答')];
+
+    await expect(ix.get(IAgentTitlePromptSource).digestExcerpt()).resolves.toEqual({
+      turns: [{ user: '磁盘里的问题', assistant: '磁盘里的回答' }],
+    });
+  });
+
+  it('excerpt composition merges multiple text parts of one journal step', async () => {
+    journal = [
+      userAppendMessage('du1', '磁盘里的问题'),
+      ...assistantTextSteps('s1', '第一句', '第二句'),
+    ];
+
+    await expect(ix.get(IAgentTitlePromptSource).firstTurnExcerpt()).resolves.toEqual({
+      user: '磁盘里的问题',
+      assistant: '第一句 第二句',
+    });
+  });
+
+  it('degrades to the memory result when the journal read fails', async () => {
+    liveMessages = [userMessage('u1', '内存里的问题')];
+    journalFails = true;
+
+    await expect(ix.get(IAgentTitlePromptSource).firstTurnExcerpt()).resolves.toEqual({
+      user: '内存里的问题',
+      assistant: undefined,
+    });
+    await expect(ix.get(IAgentTitlePromptSource).firstUserPrompts(3)).resolves.toEqual([
+      '内存里的问题',
+    ]);
   });
 });

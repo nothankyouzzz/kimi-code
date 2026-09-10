@@ -14,6 +14,7 @@ import type {
   GoalChange,
   GoalUpdatedEvent,
   HookResultEvent,
+  KimiHarness,
   Session,
   SessionMetaUpdatedEvent,
   SkillActivatedEvent,
@@ -99,6 +100,7 @@ export interface SessionEventHost {
   aborted: boolean;
   sessionEventUnsubscribe: (() => void) | undefined;
   readonly streamingUI: StreamingUIController;
+  readonly harness: KimiHarness;
 
   requireSession(): Session;
   setAppState(patch: Partial<AppState>): void;
@@ -410,6 +412,26 @@ export class SessionEventHandler {
     }
     this.pluginMcpToolsUsedInTurn.clear();
     this.scheduleQueuedGoalPromotion();
+    this.maybeAutoGenerateTitle(event);
+  }
+
+  /**
+   * Fire-and-forget AI title generation after a completed turn. The engine
+   * itself decides whether generation applies (enabled via `[session_title]` /
+   * the `auto_session_title` flag, a replaceable title, and a resolvable model
+   * or managed login); `undefined` and failures are silent — the title just
+   * stays as-is. The `first_turn` excerpt (user + assistant of the opening
+   * exchange) is what the web client auto-generates from; a turn that has not
+   * produced its assistant half yet yields no input and simply retries on the
+   * next turn.
+   */
+  private maybeAutoGenerateTitle(event: TurnEndedEvent): void {
+    if (event.reason === 'cancelled') return;
+    const sessionId = this.host.session?.id;
+    if (sessionId === undefined) return;
+    void this.host.harness
+      .generateSessionTitle({ id: sessionId, source: 'first_turn' })
+      .catch(() => undefined);
   }
 
   private handleStepBegin(event: TurnStepStartedEvent): void {

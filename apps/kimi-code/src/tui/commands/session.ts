@@ -20,8 +20,12 @@ import type { SlashCommandHost } from './dispatch';
 // ---------------------------------------------------------------------------
 
 export async function handleTitleCommand(host: SlashCommandHost, args: string): Promise<void> {
-  const title = args.trim();
-  if (title.length === 0) {
+  const raw = args.trim();
+  if (raw === 'generate') {
+    await handleGenerateTitleCommand(host);
+    return;
+  }
+  if (raw.length === 0) {
     const current = host.state.appState.sessionTitle;
     host.showStatus(
       current !== null && current.length > 0
@@ -39,7 +43,7 @@ export async function handleTitleCommand(host: SlashCommandHost, args: string): 
     if (session === undefined) return;
   }
 
-  const newTitle = title.slice(0, 200);
+  const newTitle = raw.slice(0, 200);
   try {
     await host.harness.renameSession({ id: session.id, title: newTitle });
   } catch (error) {
@@ -48,6 +52,33 @@ export async function handleTitleCommand(host: SlashCommandHost, args: string): 
     return;
   }
   host.showStatus(`Session title set to: ${newTitle}`);
+}
+
+async function handleGenerateTitleCommand(host: SlashCommandHost): Promise<void> {
+  const session = host.session;
+  if (session === undefined) {
+    host.showError(NO_ACTIVE_SESSION_MESSAGE);
+    return;
+  }
+  host.showStatus('Generating session title…');
+  try {
+    // `digest` (the whole conversation arc) suits an explicit mid-session
+    // regeneration; the automatic pass uses `first_turn` instead.
+    const title = await host.harness.generateSessionTitle({
+      id: session.id,
+      force: true,
+      source: 'digest',
+    });
+    if (title === undefined) {
+      host.showError(
+        'Session title generation unavailable: enable it via [session_title].enabled with a model, and make sure the conversation has prompts to generate from.',
+      );
+      return;
+    }
+    host.showStatus(`Session title set to: ${title}`);
+  } catch (error) {
+    host.showError(`Failed to generate session title: ${formatErrorMessage(error)}`);
+  }
 }
 
 export async function handleForkCommand(host: SlashCommandHost, args: string): Promise<void> {

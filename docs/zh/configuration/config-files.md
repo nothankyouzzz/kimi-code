@@ -294,6 +294,23 @@ k3-max = "同一模型的 max Thinking 档位。适合最难的子任务。"
 - `force` 未搭配 `default_model`，或与 `models` 表同时使用。
 :::
 
+## `session_title`
+
+AI 会话标题生成。启用后，客户端会在首轮对话完成后为会话请求生成一个简短标题，重命名框或 `/title generate` 可以随时强制重新生成。未启用时，会话标题保持本地取首条 prompt 的摘要。
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | `boolean` | `false` | 启用 AI 会话标题生成。也可以通过 `KIMI_CODE_EXPERIMENTAL_AUTO_SESSION_TITLE=1`（或总开关 `KIMI_CODE_EXPERIMENTAL_FLAG=1`）开启 |
+| `model` | `string` | — | 用于生成标题的模型——[`[models]`](#models) 条目的 id 或别名。设置后标题由该模型生成；未设置时，使用已登录 Kimi Code 账号的托管 `chat_title` 工具 |
+
+```toml
+[session_title]
+enabled = true
+model = "kimi-code/kimi-for-coding-highspeed"
+```
+
+生成是尽力而为的：任何失败（模型无法解析、provider 报错、输出为空）都会保留当前标题；你用 `/title <text>` 设置的自定义标题不会被自动覆盖——传入 `force`（例如 `/title generate`）可以强制重新生成。
+
 ## `thinking`
 
 `thinking` 设置 Thinking 模式的全局默认行为。

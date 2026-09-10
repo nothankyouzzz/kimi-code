@@ -20,9 +20,17 @@ import { isOAuthCatalogVendor } from '#/llm-adapter/provider/provider-definition
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import { SessionMetaUpdated } from '#/session/sessionMetadata/sessionMetaEvents';
+import { IConfigService } from '#/app/config/config';
+import { IModelCatalog } from '#/llm-adapter/model/catalog';
+import type { ModelRequester } from '#/llm-adapter/model/model-requester';
+import { createUserMessage, extractText } from '#/llm-adapter/contract/message';
 
 import { IAgentTitlePromptSource } from './agentTitlePromptSource';
-import { AUTO_SESSION_TITLE_FLAG_ID } from './flag';
+import {
+  isSessionTitleEnabled,
+  resolveSessionTitleModelAlias,
+  resolveSessionTitleRequester,
+} from './configSection';
 import { ISessionTitleService, type SessionTitleSource } from './sessionTitle';
 
 const MAX_GENERATED_TITLE_LENGTH = 200;
@@ -41,6 +49,14 @@ const MAX_TITLE_DIGEST_ASSISTANT = 200;
 
 const MAX_TITLE_DIGEST_INPUT_LENGTH = 3000;
 
+const MAX_TITLE_COMPLETION_TOKENS = 100;
+
+const TITLE_SYSTEM_PROMPT = [
+  'You generate a concise session title from a conversation excerpt.',
+  'Reply with ONLY the title text: written in the same language as the conversation,',
+  'without surrounding quotes, without a trailing period, at most 60 characters.',
+].join(' ');
+
 export class SessionTitleService implements ISessionTitleService {
   declare readonly _serviceBrand: undefined;
 
@@ -56,6 +72,8 @@ export class SessionTitleService implements ISessionTitleService {
     @IHostRequestHeaders private readonly hostHeaders: IHostRequestHeaders,
     @IFlagService private readonly flags: IFlagService,
     @ILogService private readonly log: ILogService,
+    @IConfigService private readonly config: IConfigService,
+    @IModelCatalog private readonly catalog: IModelCatalog,
   ) {}
 
   async generateTitle(opts?: {
@@ -77,7 +95,7 @@ export class SessionTitleService implements ISessionTitleService {
     force: boolean,
     source: SessionTitleSource,
   ): Promise<string | undefined> {
-    if (!this.flags.enabled(AUTO_SESSION_TITLE_FLAG_ID)) return undefined;
+    if (!isSessionTitleEnabled(this.config, this.flags)) return undefined;
     const current = await this.metadata.read();
     if (!force) {
       if (current.titleKind === 'custom') return undefined;
@@ -97,6 +115,39 @@ export class SessionTitleService implements ISessionTitleService {
   ): Promise<string | undefined> {
     const current = await this.metadata.read();
     if (!force && current.titleKind === 'custom') return undefined;
+    const modelAlias = resolveSessionTitleModelAlias(this.config);
+    if (modelAlias !== undefined) return this.generateViaModelAndApply(modelAlias, chatContent, force);
+    return this.generateViaManagedAndApply(chatContent, force);
+  }
+
+  private async generateViaModelAndApply(
+    modelAlias: string,
+    chatContent: string,
+    force: boolean,
+  ): Promise<string | undefined> {
+    const requester = resolveSessionTitleRequester(this.config, this.catalog);
+    if (requester === undefined) {
+      this.log.warn(
+        `session title model "${modelAlias}" could not be resolved; keeping the current title`,
+      );
+      return undefined;
+    }
+    let title: string | undefined;
+    try {
+      title = await requestTitleViaModel(requester, chatContent);
+    } catch (error) {
+      this.log.debug(
+        `session title generation via model failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return undefined;
+    }
+    return this.applyGeneratedTitle(title, force);
+  }
+
+  private async generateViaManagedAndApply(
+    chatContent: string,
+    force: boolean,
+  ): Promise<string | undefined> {
     const provider = this.providers.get(KIMI_CODE_PROVIDER_NAME);
     if (
       provider === undefined ||
@@ -145,21 +196,47 @@ export class SessionTitleService implements ISessionTitleService {
       this.log.debug(`chat_title request failed: ${result.message}`);
       return undefined;
     }
-    const title = result.title.slice(0, MAX_GENERATED_TITLE_LENGTH);
-    const applied = await this.metadata.setGeneratedTitleIfUncustomized(title, { force });
+    return this.applyGeneratedTitle(result.title, force);
+  }
+
+  private async applyGeneratedTitle(
+    title: string | undefined,
+    force: boolean,
+  ): Promise<string | undefined> {
+    if (title === undefined) return undefined;
+    const normalized = title.slice(0, MAX_GENERATED_TITLE_LENGTH);
+    const applied = await this.metadata.setGeneratedTitleIfUncustomized(normalized, { force });
     if (!applied) return undefined;
     this.eventService.publish(
       new SessionMetaUpdated({
         payload: {
           agentId: 'main',
           sessionId: this.ctx.sessionId,
-          title,
-          patch: { title, isCustomTitle: false },
+          title: normalized,
+          patch: { title: normalized, isCustomTitle: false },
         },
       }),
     );
-    return title;
+    return normalized;
   }
+}
+
+async function requestTitleViaModel(
+  requester: ModelRequester,
+  chatContent: string,
+): Promise<string | undefined> {
+  const messages = [createUserMessage(chatContent)];
+  let title: string | undefined;
+  for await (const event of requester.request(
+    { systemPrompt: TITLE_SYSTEM_PROMPT, tools: [], messages },
+    undefined,
+    { maxCompletionTokens: MAX_TITLE_COMPLETION_TOKENS },
+  )) {
+    if (event.type !== 'finish') continue;
+    const text = extractText(event.message).trim();
+    if (text.length > 0) title = text.split('\n')[0]!.trim();
+  }
+  return title;
 }
 
 function titleInputFromPrompts(prompts: readonly string[]): string | undefined {

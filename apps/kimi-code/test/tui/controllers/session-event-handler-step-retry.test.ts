@@ -36,6 +36,7 @@ function makeHost() {
       finalizeLiveTextBuffers: vi.fn(),
       completeToolResult: vi.fn(),
     },
+    harness: { generateSessionTitle: vi.fn(async () => undefined) },
     requireSession: vi.fn(),
     setAppState: vi.fn((patch: Record<string, unknown>) =>
       Object.assign(host.state.appState, patch),

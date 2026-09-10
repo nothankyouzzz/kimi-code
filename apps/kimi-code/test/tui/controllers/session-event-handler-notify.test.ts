@@ -42,6 +42,7 @@ function makeHost() {
       completeToolResult: vi.fn(),
       getTurnContext: vi.fn(() => ({ turnId: '1', step: 0 })),
     },
+    harness: { generateSessionTitle: vi.fn(async () => undefined) },
     requireSession: vi.fn(),
     setAppState: vi.fn((patch: Record<string, unknown>) =>
       Object.assign(host.state.appState, patch),

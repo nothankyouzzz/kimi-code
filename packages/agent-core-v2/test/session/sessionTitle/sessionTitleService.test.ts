@@ -36,6 +36,14 @@ import {
   type SessionMetadataChangedEvent,
 } from '#/session/sessionMetadata/sessionMetadata';
 import { SessionMetaUpdated } from '#/session/sessionMetadata/sessionMetaEvents';
+import { IConfigService } from '#/app/config/config';
+import { IModelCatalog, type Model } from '#/llm-adapter/model/catalog';
+import type { ModelRequester, ModelRequestEvent } from '#/llm-adapter/model/model-requester';
+import { createAssistantMessage } from '#/llm-adapter/contract/message';
+import {
+  SESSION_TITLE_SECTION,
+  type SessionTitleConfig,
+} from '#/session/sessionTitle/configSection';
 
 import { registerLogServices } from '../../_base/log/stubs';
 import { stubProviderService } from '../../app/provider/stubs';
@@ -146,6 +154,12 @@ describe('SessionTitleService', () => {
   let digestExcerpt: TitleDigestExcerpt;
   let tokenCalls: boolean[];
   let flagEnabled: boolean;
+  let sessionTitleConfig: SessionTitleConfig | undefined;
+  let catalogRequesters: Map<string, ModelRequester>;
+  let catalogFindByName: (name: string) => readonly string[];
+  let modelTitle: string | undefined;
+  let modelRequestError: Error | undefined;
+  let modelRequestCalls: number;
 
   beforeEach(() => {
     tokenError = undefined;
@@ -157,6 +171,12 @@ describe('SessionTitleService', () => {
     digestExcerpt = { turns: [] };
     tokenCalls = [];
     flagEnabled = true;
+    sessionTitleConfig = undefined;
+    catalogRequesters = new Map();
+    catalogFindByName = () => [];
+    modelTitle = undefined;
+    modelRequestError = undefined;
+    modelRequestCalls = 0;
     providers = { 'managed:kimi-code': MANAGED_PROVIDER };
     metadata = new FakeSessionMetadata();
     events = new FakeEventService();
@@ -221,6 +241,18 @@ describe('SessionTitleService', () => {
           thirdPartyHeaders: {},
         });
         reg.definePartialInstance(IFlagService, { enabled: () => flagEnabled });
+        reg.definePartialInstance(IConfigService, {
+          get: <T>(domain: string) =>
+            (domain === SESSION_TITLE_SECTION ? sessionTitleConfig : undefined) as T,
+        });
+        reg.definePartialInstance(IModelCatalog, {
+          getRequester: (id: string) => {
+            const requester = catalogRequesters.get(id);
+            if (requester === undefined) throw new Error(`model not resolvable: ${id}`);
+            return requester;
+          },
+          findByName: (name: string) => catalogFindByName(name),
+        });
         reg.define(ISessionTitleService, SessionTitleService);
       },
     });
@@ -606,4 +638,123 @@ describe('SessionTitleService', () => {
     await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  describe('with a configured [session_title].model', () => {
+    beforeEach(() => {
+      sessionTitleConfig = { enabled: true, model: 'title-model' };
+      modelTitle = '模型生成的标题';
+      catalogRequesters.set('title-model', createFakeRequester());
+    });
+
+    it('generates the title through the configured model without touching the managed backend', async () => {
+      titlePrompts = ['帮我调试这个 Go 程序'];
+
+      const title = await ix.get(ISessionTitleService).generateTitle();
+
+      expect(title).toBe('模型生成的标题');
+      expect(metadata.meta.title).toBe('模型生成的标题');
+      expect(metadata.meta.titleKind).toBe('generated');
+      expect(modelRequestCalls).toBe(1);
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      const rebroadcast = events.published.find(
+        (event): event is SessionMetaUpdated =>
+          event.type === 'session.meta.updated' &&
+          (event as SessionMetaUpdated).payload.patch?.title === '模型生成的标题',
+      );
+      expect(rebroadcast).toBeDefined();
+    });
+
+    it('resolves the model by name/alias when the exact id is missing', async () => {
+      titlePrompts = ['hello'];
+      catalogRequesters.clear();
+      catalogFindByName = () => ['resolved-title-model'];
+      catalogRequesters.set('resolved-title-model', createFakeRequester());
+
+      const title = await ix.get(ISessionTitleService).generateTitle();
+
+      expect(title).toBe('模型生成的标题');
+      expect(modelRequestCalls).toBe(1);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('keeps the current title when the configured model cannot be resolved', async () => {
+      catalogRequesters.clear();
+      catalogFindByName = () => [];
+
+      await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
+      expect(modelRequestCalls).toBe(0);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('keeps the current title when the model request fails', async () => {
+      titlePrompts = ['hello'];
+      modelRequestError = new Error('provider down');
+
+      await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
+      expect(modelRequestCalls).toBe(1);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('keeps the current title when the model returns empty text', async () => {
+      modelTitle = '   \n  ';
+
+      await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
+      expect(metadata.meta.title).toBeUndefined();
+    });
+
+    it('takes the first line of the model output as the title', async () => {
+      titlePrompts = ['hello'];
+      modelTitle = '调试 Go 程序\nwith a second line';
+
+      const title = await ix.get(ISessionTitleService).generateTitle();
+
+      expect(title).toBe('调试 Go 程序');
+    });
+
+    it('force regeneration overwrites a custom title through the model path', async () => {
+      titlePrompts = ['hello'];
+      await metadata.setTitle('用户标题');
+
+      const title = await ix.get(ISessionTitleService).generateTitle({ force: true });
+
+      expect(title).toBe('模型生成的标题');
+      expect(metadata.meta.titleKind).toBe('generated');
+    });
+
+    it('stays disabled when both the flag and [session_title].enabled are off', async () => {
+      flagEnabled = false;
+      sessionTitleConfig = { enabled: false, model: 'title-model' };
+
+      await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
+      expect(modelRequestCalls).toBe(0);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('generates via config even when the experimental flag is off', async () => {
+      titlePrompts = ['hello'];
+      flagEnabled = false;
+
+      const title = await ix.get(ISessionTitleService).generateTitle();
+
+      expect(title).toBe('模型生成的标题');
+      expect(modelRequestCalls).toBe(1);
+    });
+  });
+
+  function createFakeRequester(): ModelRequester {
+    return {
+      model: {} as Model,
+      request: async function* request(): AsyncGenerator<ModelRequestEvent> {
+        modelRequestCalls += 1;
+        if (modelRequestError !== undefined) throw modelRequestError;
+        if (modelTitle !== undefined) {
+          yield {
+            type: 'finish',
+            message: createAssistantMessage([{ type: 'text', text: modelTitle }]),
+          };
+        }
+      },
+    };
+  }
 });
