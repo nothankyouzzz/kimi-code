@@ -6,6 +6,14 @@
 # branch, pushed to the fork). The live copy used by the upgrade hook is
 # ~/.kimi-code/upgrade-with-patches.sh — install/update it with install.sh.
 #
+# Patch branches are read from **origin** by default: the remote copy is
+# authoritative, because a branch that changed there was rebased onto the
+# current upstream main and amended. Local branches that are strictly behind
+# origin are fast-forwarded first, so the branches an agent inspects afterwards
+# are the ones the build used; branches that are ahead or diverged carry
+# unpushed work, are never touched, and are reported. KIMI_PATCH_LOCAL=1 flips
+# the sourcing back to the local branches and skips the fetch (development).
+#
 # Invoked by the local `kimi upgrade` delegation hook (target version as $1),
 # or run directly. Before building, the pipeline syncs the local main branch
 # to upstream/main (fast-forward only) and gates on a merge-conflict check:
@@ -41,6 +49,8 @@
 #   DRY_RUN=1         stop before the build step, print the plan only
 #   FORCE=1           rebuild even when state matches the target release
 #   SKIP_TYPECHECK=1  skip the pre-build type-check gate
+#   KIMI_PATCH_LOCAL=1  source patch branches from local branches instead of
+#                       origin, and skip the origin fetch (development/debug)
 set -euo pipefail
 
 STATE_FILE="${KIMI_PATCH_STATE:-$HOME/.kimi-code/local-patches.json}"
@@ -56,22 +66,84 @@ TAG_PREFIX="@moonshot-ai/kimi-code@"
 log() { printf '[kimi-patched-upgrade] %s\n' "$*"; }
 die() { printf '[kimi-patched-upgrade] ERROR: %s\n' "$*" >&2; exit 1; }
 
-# Resolve a patch branch to a ref the pipeline can read: prefer the local
-# branch (local-only patches never leave the machine), otherwise fetch and
-# fall back to origin/<branch>. Prints the ref on success; exits nonzero when
-# the branch exists nowhere (the caller turns that into a die).
+# Resolve a patch branch to the ref the pipeline reads. Origin is
+# authoritative: a branch that changed on the remote was rebased onto the
+# current upstream main and amended there, so origin/<branch> wins whenever it
+# exists — the local branch is the source only for patches that never left
+# this machine. KIMI_PATCH_LOCAL=1 inverts the order for development, where
+# the uncommitted-to-origin edit is exactly what you are testing. Origin refs
+# are refreshed once by the fetch in section 0a; this function never touches
+# the network. Prints the ref on success; exits nonzero when the branch exists
+# nowhere (the caller turns that into a die).
 resolve_patch_ref() {
-  local branch="$1"
-  if git show-ref --verify --quiet "refs/heads/$branch"; then
-    printf '%s\n' "$branch"
-    return 0
+  local branch="$1" ref full
+  local -a order
+  if [ "${KIMI_PATCH_LOCAL:-0}" = "1" ]; then
+    order=("$branch" "origin/$branch")
+  else
+    order=("origin/$branch" "$branch")
   fi
-  git fetch origin "$branch" --quiet
-  if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
-    printf '%s\n' "origin/$branch"
-    return 0
-  fi
+  for ref in "${order[@]}"; do
+    case "$ref" in
+      origin/*) full="refs/remotes/$ref" ;;
+      *) full="refs/heads/$ref" ;;
+    esac
+    if git show-ref --verify --quiet "$full"; then
+      printf '%s\n' "$ref"
+      return 0
+    fi
+  done
   return 1
+}
+
+# Fast-forward every active patch branch that is strictly behind origin, so the
+# branches an agent inspects afterwards are the ones the build reads. Only pure
+# catch-up moves are made: a branch that is ahead or has diverged carries
+# unpushed work and is left untouched (its origin ref is what the build uses
+# anyway), and so is a branch that is currently checked out — moving a
+# checked-out ref would leave the working tree inconsistent with HEAD.
+# Best-effort throughout: the build never depends on the local refs, so a
+# failure here only warns.
+sync_local_patch_branches() {
+  local count current branch status local_sha origin_sha
+  count=$(jq '.patches | length' "$STATE_FILE")
+  current=$(git symbolic-ref --short -q HEAD || true)
+  for ((i = 0; i < count; i++)); do
+    branch=$(jq -r ".patches[$i].branch" "$STATE_FILE")
+    status=$(jq -r ".patches[$i].status" "$STATE_FILE")
+    [ "$status" = "active" ] || continue
+    git show-ref --verify --quiet "refs/heads/$branch" || continue
+    git show-ref --verify --quiet "refs/remotes/origin/$branch" || continue
+    local_sha=$(git rev-parse "refs/heads/$branch")
+    origin_sha=$(git rev-parse "refs/remotes/origin/$branch")
+    [ "$local_sha" = "$origin_sha" ] && continue
+    # Strictly behind means fast-forwardable; anything else keeps its commits.
+    git merge-base --is-ancestor "refs/heads/$branch" "refs/remotes/origin/$branch" || continue
+    if [ "$branch" = "$current" ]; then
+      log "note: local $branch is behind origin but is the checked-out branch — not fast-forwarded"
+      continue
+    fi
+    if git branch -f "$branch" "refs/remotes/origin/$branch" 2>/dev/null; then
+      log "synced local $branch -> origin/$branch ($(git rev-parse --short "refs/remotes/origin/$branch"))"
+    else
+      log "note: could not fast-forward local $branch to origin/$branch"
+    fi
+  done
+}
+
+# Non-blocking notice when the local branch is not the ref being built from.
+# In a development loop, "why didn't my change take effect?" is answered by
+# this line; it stays quiet whenever the two agree.
+warn_if_local_differs() {
+  local branch="$1" ref="$2"
+  if [ "${KIMI_PATCH_LOCAL:-0}" = "1" ]; then return 0; fi
+  if ! git show-ref --verify --quiet "refs/heads/$branch"; then return 0; fi
+  if ! git show-ref --verify --quiet "refs/remotes/origin/$branch"; then return 0; fi
+  local local_sha origin_sha
+  local_sha=$(git rev-parse "refs/heads/$branch")
+  origin_sha=$(git rev-parse "refs/remotes/origin/$branch")
+  if [ "$local_sha" = "$origin_sha" ]; then return 0; fi
+  log "note: local $branch ($(git rev-parse --short "refs/heads/$branch")) differs from origin ($(git rev-parse --short "refs/remotes/origin/$branch")) — building from $ref; set KIMI_PATCH_LOCAL=1 to build from your local branch"
 }
 
 # When a cherry-pick stops on conflicts that are ALL in generated docs
@@ -117,6 +189,22 @@ cd "$REPO"
 # nor the build.
 [ -z "$(git status --porcelain --untracked-files=no)" ] || die "repo working tree has uncommitted changes; commit or stash first"
 
+# --- 0a. refresh the patch source ----------------------------------------------
+# Patch branches are read from origin, and the strictly-behind local branches
+# are then fast-forwarded to it, so the branches an agent inspects afterwards
+# are the ones this run builds from (see the header). Fetching once up front
+# keeps every later resolution — the self-check below, the merge gate, the
+# fingerprint and the apply phase — on the same current remote state.
+# KIMI_PATCH_LOCAL=1 is the development mode: it reads the local branches
+# instead, so neither step runs (which also keeps the dev loop usable offline).
+if [ "${KIMI_PATCH_LOCAL:-0}" = "1" ]; then
+  log "KIMI_PATCH_LOCAL=1 — sourcing patch branches from local branches (development mode)"
+else
+  git fetch origin --prune --quiet \
+    || die "git fetch origin failed — patch branches are sourced from origin; restore network access, or set KIMI_PATCH_LOCAL=1 to build from your local branches"
+  sync_local_patch_branches
+fi
+
 GIT_DIR=$(git rev-parse --git-dir)
 PREV_REF=$(git symbolic-ref --short -q HEAD || git rev-parse HEAD)
 restore_ref() { git checkout --quiet "$PREV_REF" 2>/dev/null || true; }
@@ -137,10 +225,15 @@ trap restore_ref EXIT
 # config error, not a drift: die. The registry comparison covers the patch
 # branch set + each branch's `pr` only — `status` mutations (merged marks)
 # and per-machine `state` are legitimate live data and are excluded.
-SELF_HOOK_BLOB_REF=$(git show-ref --verify --quiet refs/heads/local/upgrade-hook && echo refs/heads/local/upgrade-hook \
-  || { git fetch origin local/upgrade-hook --quiet 2>/dev/null; \
-       git show-ref --verify --quiet refs/remotes/origin/local/upgrade-hook \
-         && echo refs/remotes/origin/local/upgrade-hook || echo missing; })
+# The versioned source is resolved the same way patch branches are (origin by
+# default, the local branch under KIMI_PATCH_LOCAL=1), so the comparison is
+# always against the copy that governs this run. Origin refs are fresh from
+# section 0a — no per-ref fetch here.
+if SELF_HOOK_SOURCE=$(resolve_patch_ref "local/upgrade-hook"); then
+  SELF_HOOK_BLOB_REF="$SELF_HOOK_SOURCE"
+else
+  SELF_HOOK_BLOB_REF="missing"
+fi
 if [ "$SELF_HOOK_BLOB_REF" = "missing" ]; then
   log "self-check skipped: local/upgrade-hook ref not found locally or on origin"
 else
@@ -287,10 +380,14 @@ for ((i = 0; i < PATCH_COUNT; i++)); do
     fi
   fi
 
-  # Resolve the branch ref (local branch preferred, origin fallback).
+  # Resolve the branch ref (origin is authoritative — see resolve_patch_ref) and
+  # name it: in a development loop this line is the answer to "why didn't my
+  # local change take effect?".
   if ! REF=$(resolve_patch_ref "$BRANCH"); then
     die "patch branch $BRANCH not found locally or on origin"
   fi
+  log "patch $BRANCH: using $REF ($(git rev-parse --short "$REF"))"
+  warn_if_local_differs "$BRANCH" "$REF"
   # Already merged into upstream/main — trivially conflict-free; the apply
   # phase below will report it as "already upstream".
   git merge-base --is-ancestor "$REF" upstream/main && continue
@@ -324,9 +421,14 @@ for ((i = 0; i < PATCH_COUNT; i++)); do
   F_BRANCH=$(jq -r ".patches[$i].branch" "$STATE_FILE")
   F_STATUS=$(jq -r ".patches[$i].status" "$STATE_FILE")
   [ "$F_STATUS" = "active" ] || continue
-  F_SHA=$(git rev-parse --verify --quiet "refs/heads/$F_BRANCH" \
-    || git rev-parse --verify --quiet "refs/remotes/origin/$F_BRANCH" \
-    || echo "missing")
+  # The same ref the gate and the apply phase use: the fingerprint has to change
+  # whenever the *built* commit changes, which for origin-sourced branches is
+  # origin's head, not the local branch's.
+  if F_REF=$(resolve_patch_ref "$F_BRANCH"); then
+    F_SHA=$(git rev-parse "$F_REF")
+  else
+    F_SHA="missing"
+  fi
   FINGERPRINT_INPUT+=$'\n'"$F_BRANCH@$F_SHA"
 done
 PATCHES_HASH=$(printf '%s' "$FINGERPRINT_INPUT" | sha256sum | awk '{print $1}')
@@ -363,8 +465,8 @@ for ((i = 0; i < PATCH_COUNT; i++)); do
   STATUS=$(jq -r ".patches[$i].status" "$STATE_FILE")
   [ "$STATUS" = "active" ] || { SKIPPED+=("$BRANCH ($STATUS)"); continue; }
 
-  # Resolve the same ref the conflict check used: local branch preferred,
-  # origin fallback.
+  # The same ref the conflict check resolved (origin by default): the commits
+  # replayed here come from the remote copy, not from the local branch.
   if ! REF=$(resolve_patch_ref "$BRANCH"); then
     die "patch branch $BRANCH not found locally or on origin"
   fi
@@ -451,9 +553,13 @@ if [ "${SKIP_TYPECHECK:-0}" != "1" ]; then
         T_BRANCH=$(jq -r ".patches[$i].branch" "$STATE_FILE")
         T_STATUS=$(jq -r ".patches[$i].status" "$STATE_FILE")
         [ "$T_STATUS" = "active" ] || continue
-        T_SHA=$(git rev-parse --verify --quiet "refs/heads/$T_BRANCH" \
-          || git rev-parse --verify --quiet "refs/remotes/origin/$T_BRANCH" \
-          || echo "missing")
+        # Same resolution as the build: the attribution has to compare the
+        # tree the patches actually came from.
+        if T_REF=$(resolve_patch_ref "$T_BRANCH"); then
+          T_SHA=$(git rev-parse "$T_REF")
+        else
+          T_SHA="missing"
+        fi
         if [ "$T_SHA" != "missing" ] && [ -n "$(git diff --name-only "$RELEASE_COMMIT" "$T_SHA" -- "$PKG")" ]; then
           log "  likely responsible patch: $T_BRANCH (touches $PKG)"
         fi
