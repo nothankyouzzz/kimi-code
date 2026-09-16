@@ -5,7 +5,7 @@ description: Use when the kimi patched upgrade pipeline (~/.kimi-code/upgrade-wi
 
 # Resolve Patched-Upgrade Conflicts
 
-The local kimi binary is built from an upstream release plus local patch branches (pipeline: `~/.kimi-code/upgrade-with-patches.sh`; repo source: `scripts/patched-upgrade/` on the `local/upgrade-hook` branch). The pipeline's merge gate is a pure simulation (`git merge-tree --write-tree` — branches are never modified): every active patch branch must merge cleanly into `upstream/main`, else the build stops and the installed binary stays untouched. A patch that can no longer land upstream must be rebased and verified before the pipeline can run again.
+The local kimi binary is built from an upstream release plus local patch branches (pipeline: `~/.kimi-code/upgrade-with-patches.sh`; repo source: `scripts/patched-upgrade/` on the `local/upgrade-hook` branch). Patch branches are **sourced from `origin`**: the pipeline fetches once up front, builds from `origin/<branch>`, and fast-forwards any local branch that is strictly behind it. The remote copy is authoritative — a branch that changed there was rebased onto the current upstream main — and the local fast-forward is what stops you (or an agent) from analysing a stale branch. `KIMI_PATCH_LOCAL=1` inverts the sourcing to the local branches for development. The pipeline's merge gate is a pure simulation (`git merge-tree --write-tree` — branches are never modified): every active patch branch must merge cleanly into `upstream/main`, else the build stops and the installed binary stays untouched. A patch that can no longer land upstream must be rebased and verified before the pipeline can run again.
 
 ## 1. When this skill applies
 
@@ -30,18 +30,34 @@ Both mean one or more patch branches need a rebase onto `upstream/main` (§3) pl
 Inputs and conventions:
 
 - Registry: `~/.kimi-code/local-patches.json` — `patches[]` (branch / pr / status) plus per-machine `state`. The pipeline owns this file; never hand-edit it.
-- Env: `KIMI_PATCH_REPO` (repo path override; default: `.state.repoPath`, recorded by install.sh), `KIMI_PATCH_STATE`, `DRY_RUN=1` (stop before build), `FORCE=1` (rebuild even when state matches), `SKIP_TYPECHECK=1`, `KIMI_UPGRADE_STRICT_SELFCHECK=1` (make live-script drift fatal; the skill mismatch still only warns).
+- Env: `KIMI_PATCH_REPO` (repo path override; default: `.state.repoPath`, recorded by install.sh), `KIMI_PATCH_STATE`, `DRY_RUN=1` (stop before build), `FORCE=1` (rebuild even when state matches), `SKIP_TYPECHECK=1`, `KIMI_PATCH_LOCAL=1` (source patch branches from the local branches instead of `origin` and skip the origin fetch — the development loop), `KIMI_UPGRADE_STRICT_SELFCHECK=1` (make live-script drift fatal; the skill mismatch still only warns).
+- Branch sourcing is remote-first: the pipeline builds from `origin/<branch>` and fast-forwards a strictly-behind local branch to it. **A rebase you have not pushed is invisible to the next upgrade** — see §5.
 - Merged-PR handling is automatic: an entry whose upstream `pr` is MERGED gets marked `merged` and skipped by the pipeline — do not rebase it.
 
 ## 2. Diagnose — enumerate every conflicting branch
 
-The script itself collects all conflicts in one run. If you are pre-scanning, or the failure was a missing branch (`not found locally or on origin` — that is a registry/config error, stop and fix it), run the scan manually:
+The script itself collects all conflicts in one run. If you are pre-scanning, or the failure was a missing branch (`not found locally or on origin` — that is a registry/config error, stop and fix it), run the scan manually.
+
+**Sync before you scan.** The pipeline reads `origin/<branch>` and fast-forwards the local branches to match it, so do the same by hand here — otherwise the analysis describes branches that are not what gets built:
+
+```bash
+cd "$REPO"
+git fetch origin --prune
+jq -r '.patches[] | select(.status=="active") | .branch' ~/.kimi-code/local-patches.json \
+  | while read -r b; do
+      git rev-parse --verify --quiet "refs/remotes/origin/$b" >/dev/null || continue
+      git merge-base --is-ancestor "refs/heads/$b" "refs/remotes/origin/$b" 2>/dev/null || continue
+      git branch -f "$b" "origin/$b" 2>/dev/null || true   # strictly behind: pure catch-up
+    done
+```
+
+Then scan, resolving each branch exactly as the pipeline does (`origin/<branch>` first, the local branch only for a patch that never left this machine):
 
 ```bash
 cd "$REPO" && git fetch upstream main
 jq -r '.patches[] | select(.status=="active") | .branch' ~/.kimi-code/local-patches.json \
   | while read -r b; do
-      ref=$(git show-ref --verify --quiet "refs/heads/$b" && echo "$b" || echo "origin/$b")
+      ref=$(git show-ref --verify --quiet "refs/remotes/origin/$b" && echo "origin/$b" || echo "$b")
       printf '%s: ' "$b"
       git merge-tree --write-tree --name-only upstream/main "$ref" >/tmp/mt.out 2>&1 \
         && echo clean \
@@ -95,8 +111,17 @@ Every rebased branch must pass all of these, or the pipeline will (correctly) re
 
 ## 5. Re-run & confirm
 
+**The rebase has to reach `origin` first.** The pipeline sources patch branches from `origin`, so a branch you rebased locally but did not push is not what the next upgrade builds. Either push it (ask the user first — §6) and re-run, or exercise the rebased state locally without publishing it:
+
+```bash
+KIMI_PATCH_LOCAL=1 DRY_RUN=1 ~/.kimi-code/upgrade-with-patches.sh
+```
+
+That run sources the local branches, so it covers exactly the rebase you just made, and `DRY_RUN=1` stops before the build. Treat it as the pre-push gate, then push and re-run the pipeline normally.
+
 Re-run `~/.kimi-code/upgrade-with-patches.sh`. On success it prints `done: kimi <version> + N patch(es) installed`. Confirm:
 
+- the log shows each patch resolving to `origin/<branch>`, plus a `synced local <branch> -> origin/<branch>` line for every local branch that was behind;
 - `~/.kimi-code/bin/kimi --version` matches the target release;
 - `~/.kimi-code/local-patches.json` → `state.baseRelease` / `state.builtHash` / `state.builtAt` updated;
 - `~/.kimi-code/bin/kimi.prev.bak` exists (previous binary);
@@ -107,6 +132,7 @@ Note: rebasing a branch changes its head, which changes the patch fingerprint �
 ## 6. Red lines
 
 - Never push to `origin` without asking. Rebasing rewrites local history; pushes (including `local/upgrade-hook`, which carries the hook script and this skill's sibling tooling) happen only on explicit user request.
+- Never assume a local rebase changed what gets built: the pipeline reads `origin/<branch>`, so an unpushed branch is invisible to the next upgrade (§5).
 - Never hand-edit `~/.kimi-code/local-patches.json` — the pipeline owns the registry, including merged-PR `status` mutations.
 - Never call a branch clean without `git merge-tree` actually green.
 - Never resolve a STOP-and-ask conflict without the user's call.

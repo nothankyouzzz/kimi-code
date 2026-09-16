@@ -9,7 +9,13 @@ live copies used at runtime are in `~/.kimi-code/`.
   CLI delegate to `~/.kimi-code/upgrade-with-patches.sh` when it exists:
   `kimi upgrade`, the startup update prompt, and the automatic background
   install all run the script instead of the stock installer (the startup
-  prompt shows the script as the install command). The script fast-forwards
+  prompt shows the script as the install command). Patch branches are sourced
+  from `origin` (fetched once up front; `KIMI_PATCH_LOCAL=1` switches to the
+  local branches for development) — a branch that changed on the remote was
+  rebased onto the current upstream main there, so the remote copy is
+  authoritative — and strictly-behind local branches are fast-forwarded to it,
+  so the branches an agent inspects afterwards match the ones the build used.
+  The script fast-forwards
   the local `main` to `upstream/main`,
   gates on a merge-conflict check (every active patch branch must merge
   cleanly into `upstream/main`, simulated with `git merge-tree` — the
@@ -62,7 +68,13 @@ and force a pointless binary rebuild. Format:
 }
 ```
 
-- `branch`: a local branch (preferred) or one fetched from origin.
+- `branch`: the branch name. It is read from `origin/<branch>` whenever the
+  remote has it — the remote copy is authoritative, because a branch that
+  changed there is what a rebase-and-amend on the other machine produced — and
+  from the local branch only for a patch that never left this machine.
+  `KIMI_PATCH_LOCAL=1` inverts that order for development. The pipeline also
+  fast-forwards a local branch that is strictly behind origin, so the branches
+  you or an agent inspect match the ones the build used.
 - `pr`: upstream PR number, used for merged-PR detection (the script marks
   the entry `"merged"` and stops applying it once the PR merges). `null`
   skips the check.
@@ -89,6 +101,8 @@ kimi upgrade                           # rebuilds the patched binary
 
 - `KIMI_LOCAL_UPGRADE_SCRIPT` overrides the script path the CLI hook uses;
   `KIMI_PATCH_REPO` / `KIMI_PATCH_STATE` override the script's defaults;
+  `KIMI_PATCH_LOCAL=1` sources patch branches from the local branches instead
+  of `origin` and skips the origin fetch (the development loop);
   `DRY_RUN=1` prints the plan without building; `FORCE=1` rebuilds anyway;
   `SKIP_TYPECHECK=1` bypasses the pre-build type-check gate.
 - The script fails fast when `node --version` does not match `.nvmrc` — the
