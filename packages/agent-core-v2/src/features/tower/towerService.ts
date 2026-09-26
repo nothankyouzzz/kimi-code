@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { isAbsolute, normalize, resolve } from 'pathe';
 
 import { Disposable, toDisposable } from '#/_base/di/lifecycle';
 import { ScopeActivation, registerScopedService, type ISessionScopeHandle } from '#/_base/di/scope';
@@ -21,6 +22,8 @@ import { TaskTerminatedNotice } from '#/agent/task/taskOps';
 import { denyToolExecution } from '#/agent/toolExecutor/beforeToolExecuteEvent';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { AgentStatusUpdated } from '#/agent/usage/usageEvents';
+import { IBashParserService } from '#/app/bashParser/bashParser';
+import { BashParserService } from '#/app/bashParser/bashParserService';
 import { IConfigService } from '#/app/config/config';
 import { IEventBus, ISessionEventBus } from '#/app/event/eventBus';
 import { IFeatureManager } from '#/app/feature/featureManager';
@@ -34,6 +37,7 @@ import { isWithinDirectory } from '#/tool/path-access';
 import type { ToolFileAccess } from '#/tool/toolContract';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
+import { subagentParentAgentId } from '#/session/agentLifecycle/subagentMetadata';
 import { isUntitled } from '#/session/sessionMetadata/promptMetadata';
 import { SubagentStarted } from '#/session/subagent/mirrorAgentRun';
 import { TowerModeInjection } from './injection/towerModeInjection';
@@ -50,6 +54,7 @@ import {
   resolveTowerRepoRoot,
   TowerProtocolError,
 } from './protocol/index';
+import { TOWER_MODE_USER_ENABLED_ONLY } from './tools/support';
 import {
   IAgentTowerService,
   TOWER_FLAG_ID,
@@ -60,8 +65,17 @@ import {
 } from './tower';
 import { isTowerFeatureAssembled } from './towerFeature';
 import { TowerInboxSent, TowerModeEnter, TowerModeExit, towerBaseKey, towerKey, towerOwnerKey } from './towerOps';
+import { evaluateWorkerBashCommand } from './workerShellGuard';
 
 export const TOWER_MODE_TOOLS: readonly string[] = ['TowerInit', ...TOWER_TOOL_NAMES];
+
+export const TOWER_ORCHESTRATION_TOOLS: readonly string[] = [
+  'TowerInit',
+  'TowerPlan',
+  'TowerSpawn',
+  'TowerMerge',
+  'TowerTeardown',
+];
 
 export const TOWER_INBOX_WAKE_VARIANT = 'tower_inbox';
 
@@ -69,6 +83,7 @@ const WAKE_SUBJECT_PREVIEW_MAX = 120;
 
 export class AgentTowerService extends Disposable implements IAgentTowerService {
   declare readonly _serviceBrand: undefined;
+  private readonly bashParser: IBashParserService;
 
   constructor(
     @IEventDispatcher private readonly dispatcher: IEventDispatcher,
@@ -90,8 +105,11 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
     @ILogService private readonly log: ILogService,
     @IAgentLoopService private readonly loop: IAgentLoopService,
     @ISessionEventBus sessionBus: ISessionEventBus,
+    @IBashParserService bashParser?: IBashParserService,
+    @ISessionMetadata private readonly sessionMeta?: ISessionMetadata,
   ) {
     super();
+    this.bashParser = bashParser ?? new BashParserService();
     this.agentState.contributeState(towerKey);
     this.agentState.contributeState(towerOwnerKey);
     this.agentState.contributeState(towerBaseKey);
@@ -212,6 +230,18 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
     this._register(
       toolExecutor.onBeforeExecuteTool((event) => {
         if (!this.flags.enabled(TOWER_FLAG_ID)) return;
+        if (this.isActive) return;
+        if (!TOWER_ORCHESTRATION_TOOLS.includes(event.toolCall.name)) return;
+        event.veto(
+          denyToolExecution(
+            this.toolApproval.formatDenyMessage(TOWER_MODE_USER_ENABLED_ONLY),
+          ),
+        );
+      }),
+    );
+    this._register(
+      toolExecutor.onBeforeExecuteTool((event) => {
+        if (!this.flags.enabled(TOWER_FLAG_ID)) return;
         if (!this.isActive) return;
         if (event.toolCall.name !== 'TodoList') return;
         event.veto(
@@ -273,21 +303,38 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
     );
     this._register(
       toolExecutor.onBeforeExecuteTool(async (event) => {
-        if (this.profile.data().profileName !== TOWER_WORKER_PROFILE) return;
         const toolName = event.toolCall.name;
-        if (toolName !== 'Write' && toolName !== 'Edit') return;
+        if (toolName !== 'Write' && toolName !== 'Edit' && toolName !== 'Bash') return;
 
         const store = new TowerStore(resolveTowerRepoRoot(this.sessionCtx.cwd));
-        const entry = await store
-          .load()
-          .then(
-            (state) => store.resolveAgent(state, this.agentCtx.agentId),
-            () => undefined,
-          );
-        const slot = entry?.worktree;
+        const state = await store.load().catch(() => undefined);
+        if (state === undefined) return;
+
+        let entry: ReturnType<typeof store.resolveAgent> | undefined;
+        if (this.profile.data().profileName === TOWER_WORKER_PROFILE) {
+          entry = store.resolveAgent(state, this.agentCtx.agentId);
+        } else if (this.sessionMeta !== undefined) {
+          try {
+            const meta = await this.sessionMeta.read();
+            let currentId: string | undefined = this.agentCtx.agentId;
+            const seen = new Set<string>();
+            while (currentId !== undefined && !seen.has(currentId)) {
+              seen.add(currentId);
+              const parentId: string | undefined = subagentParentAgentId(meta.agents?.[currentId]);
+              if (parentId === undefined) break;
+              entry = store.resolveAgent(state, parentId);
+              if (entry !== undefined) break;
+              currentId = parentId;
+            }
+          } catch {}
+        }
+        if (entry === undefined) return;
+
+        const slot = entry.worktree;
         if (slot === undefined) return;
         const worktree = store.abs(join(WORKTREES_DIR, slot));
 
+        if (toolName === 'Write' || toolName === 'Edit') {
         const escapes = (event.execution.accesses ?? [])
           .filter(
             (access): access is ToolFileAccess =>
@@ -305,6 +352,40 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
             ),
           ),
         );
+          return;
+        }
+
+        if (toolName === 'Bash') {
+          const args = event.args;
+          if (typeof args !== 'object' || args === null) return;
+          const command = (args as { readonly command?: unknown }).command;
+          if (typeof command !== 'string') return;
+          const cwdArg = (args as { readonly cwd?: unknown }).cwd;
+          const initialCwd =
+            typeof cwdArg === 'string' && cwdArg.trim().length > 0
+              ? (isAbsolute(cwdArg) ? normalize(cwdArg) : normalize(resolve(this.sessionCtx.cwd, cwdArg)))
+              : normalize(this.sessionCtx.cwd);
+
+          const result = evaluateWorkerBashCommand(
+            command,
+            {
+              worktree,
+              initialCwd,
+              homeDir: process.env['HOME'],
+            },
+            this.bashParser,
+          );
+          if (result.allowed) return;
+          event.veto(
+            denyToolExecution(
+              this.toolApproval.formatDenyMessage(
+                `tower workers may only write inside their own worktree (${worktree}) — denied: ` +
+                  `${result.escapes.join(', ')}. ` +
+                  'Out-of-scope changes are not yours to make: file them with TowerFinding or ask the tower via TowerSend.',
+              ),
+            ),
+          );
+        }
       }),
     );
   }
@@ -427,6 +508,7 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
     if (!this.agentState.get(towerKey)) return;
     this.lastPublished = false;
     this.dropInboxWake();
+    for (const name of TOWER_MODE_TOOLS) this.profile.removeActiveTool(name);
     void this.dispatcher.dispatch(new TowerModeExit({ agentId: this.agentCtx.agentId }));
     this.telemetry.track2('tower_mode_exit', { reason });
     await this.releaseTowerOwnership();

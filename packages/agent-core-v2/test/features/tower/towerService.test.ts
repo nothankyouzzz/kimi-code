@@ -30,8 +30,11 @@ import type {
   BeforeExecuteDecision,
   ResolvedToolExecutionHookContext,
 } from '#/agent/toolExecutor/toolHooks';
+import { IBashParserService } from '#/app/bashParser/bashParser';
+import { BashParserService } from '#/app/bashParser/bashParserService';
 import { STATE_FILE, TowerStore, type TowerState } from '#/features/tower/protocol/index';
 import { TowerSendTool } from '#/features/tower/tools/send/sendTool';
+import { TOWER_MODE_USER_ENABLED_ONLY } from '#/features/tower/tools/support';
 import {
   IAgentTowerService,
   TOWER_FLAG_ID,
@@ -39,7 +42,12 @@ import {
   type TowerEnterFailure,
 } from '#/features/tower/tower';
 import { _setTowerFeatureAssembledForTests } from '#/features/tower/towerFeature';
-import { AgentTowerService, TOWER_INBOX_WAKE_VARIANT, TOWER_MODE_TOOLS } from '#/features/tower/towerService';
+import {
+  AgentTowerService,
+  TOWER_INBOX_WAKE_VARIANT,
+  TOWER_MODE_TOOLS,
+  TOWER_ORCHESTRATION_TOOLS,
+} from '#/features/tower/towerService';
 import { towerKey, TowerInboxSent } from '#/features/tower/towerOps';
 import { TaskTerminatedNotice } from '#/agent/task/taskOps';
 import { IAgentTaskService } from '#/agent/task/task';
@@ -141,6 +149,21 @@ function writeHookContext(toolName: string, paths: readonly string[]): ResolvedT
     execution: {
       approvalRule: toolName,
       accesses: paths.flatMap((path) => ToolAccesses.writeFile(path)),
+      execute: async () => ({ output: '' }),
+    },
+  };
+}
+
+function bashHookContext(command: string, cwd?: string): ResolvedToolExecutionHookContext {
+  const call = toolCall('Bash', 'call_bash');
+  return {
+    turnId: 0,
+    signal,
+    toolCall: call,
+    toolCalls: [call],
+    args: { command, ...(cwd !== undefined ? { cwd } : undefined) },
+    execution: {
+      approvalRule: 'Bash',
       execute: async () => ({ output: '' }),
     },
   };
@@ -259,6 +282,7 @@ describe('AgentTowerService', () => {
     });
     stubMainAgentScope(ix);
     registerTestEventDispatcher(ix);
+    ix.stub(IBashParserService, new BashParserService());
     ix.set(IAgentTowerService, new SyncDescriptor(AgentTowerService));
   });
   afterEach(() => disposables.dispose());
@@ -1114,6 +1138,80 @@ describe('AgentTowerService', () => {
     expect(formatDenyMessage).not.toHaveBeenCalled();
   });
 
+  it.each(TOWER_ORCHESTRATION_TOOLS)(
+    'denies %s while tower mode is inactive',
+    async (toolName) => {
+      ix.get(IAgentTowerService);
+
+      const decision = await fire(hookContext([toolCall(toolName, 'call_orch')]));
+
+      expect(decision).toEqual({
+        veto: {
+          output: TOWER_MODE_USER_ENABLED_ONLY,
+          isError: true,
+        },
+      });
+      expect(permissionGateRan).toBe(false);
+      expect(formatDenyMessage).toHaveBeenCalledWith(TOWER_MODE_USER_ENABLED_ONLY);
+    },
+  );
+
+  it('denies TowerMerge and TowerTeardown after exit', async () => {
+    const tower = ix.get(IAgentTowerService);
+    await tower.enter();
+    expect(tower.isActive).toBe(true);
+
+    await tower.exit();
+    expect(tower.isActive).toBe(false);
+
+    for (const toolName of ['TowerMerge', 'TowerTeardown']) {
+      formatDenyMessage.mockClear();
+      permissionGateRan = false;
+      const decision = await fire(hookContext([toolCall(toolName, 'call_after_exit')]));
+      expect(decision).toEqual({
+        veto: {
+          output: TOWER_MODE_USER_ENABLED_ONLY,
+          isError: true,
+        },
+      });
+      expect(permissionGateRan).toBe(false);
+      expect(formatDenyMessage).toHaveBeenCalledWith(TOWER_MODE_USER_ENABLED_ONLY);
+    }
+  });
+
+  it('allows orchestration tools while tower mode is active', async () => {
+    const tower = ix.get(IAgentTowerService);
+    await tower.enter();
+    expect(tower.isActive).toBe(true);
+
+    for (const toolName of TOWER_ORCHESTRATION_TOOLS) {
+      permissionGateRan = false;
+      const decision = await fire(hookContext([toolCall(toolName, 'call_active')]));
+      expect(decision).toBeUndefined();
+      expect(permissionGateRan).toBe(true);
+    }
+  });
+
+  it('does not veto non-orchestration tower tools while tower mode is inactive', async () => {
+    ix.get(IAgentTowerService);
+
+    const nonOrchestrationTools = [
+      'TowerSend',
+      'TowerInbox',
+      'TowerFinding',
+      'TowerReview',
+      'TowerMission',
+      'TowerStatus',
+    ];
+
+    for (const toolName of nonOrchestrationTools) {
+      permissionGateRan = false;
+      const decision = await fire(hookContext([toolCall(toolName, 'call_comms')]));
+      expect(decision).toBeUndefined();
+      expect(permissionGateRan).toBe(true);
+    }
+  });
+
   it('denies tower tools while the tower flag is off, even with the mode active', async () => {
     const tower = ix.get(IAgentTowerService);
     await tower.enter();
@@ -1678,7 +1776,7 @@ describe('AgentTowerService', () => {
     expect(tower.isActive).toBe(false);
   });
 
-  it('enter activates the tower tool set on the main agent; exit keeps it', async () => {
+  it('enter activates the tower tool set on the main agent; exit removes it (enter/exit symmetry)', async () => {
     const tower = ix.get(IAgentTowerService);
 
     await tower.enter();
@@ -1686,7 +1784,17 @@ describe('AgentTowerService', () => {
     expect(removedTools).toEqual([]);
 
     await tower.exit();
+    expect(removedTools).toEqual([...TOWER_MODE_TOOLS]);
+
+    addedTools.length = 0;
+    removedTools.length = 0;
+
+    await tower.enter();
+    expect(addedTools).toEqual([...TOWER_MODE_TOOLS]);
     expect(removedTools).toEqual([]);
+
+    await tower.exit();
+    expect(removedTools).toEqual([...TOWER_MODE_TOOLS]);
   });
 
   it('enter reports not-main-agent and is inert on a non-main agent', async () => {
@@ -2583,14 +2691,308 @@ describe('AgentTowerService', () => {
       expect(formatDenyMessage).toHaveBeenCalledTimes(1);
     });
 
-    it('abstains on non-Write/Edit tools for a worker', async () => {
+    it('abstains on non-write tools for a worker', async () => {
       ix.get(IAgentTowerService);
 
-      const decision = await fire(hookContext([toolCall('Bash', 'call_bash')]));
+      const decision = await fire(hookContext([toolCall('AskUserQuestion', 'call_ask')]));
 
       expect(decision).toBeUndefined();
       expect(permissionGateRan).toBe(true);
       expect(formatDenyMessage).not.toHaveBeenCalled();
+    });
+
+    it('allows read-only Bash commands outside worktree', async () => {
+      ix.get(IAgentTowerService);
+
+      const commands = [
+        `cat ${repo}/README.md`,
+        'git status',
+        'git diff',
+        'git log',
+        'git rev-parse HEAD',
+        `ls -la ${repo}`,
+        `grep -r "fixture" ${repo}`,
+        'git tag',
+        'git tag -l',
+        'git tag --list',
+        'git branch',
+        'git branch --merged',
+        'git branch --contains HEAD',
+        "git branch --format='%(refname)'",
+        "find . -name '*.json' -exec sed -n 1p {} +",
+        "find . -name '*.ts' -exec perl -ne print {} +",
+        `find ${repo} -name '*.ts' -exec git -C ${worktree} status ;`,
+        'diff <(echo a) <(echo b)',
+      ];
+
+      for (const cmd of commands) {
+        formatDenyMessage.mockClear();
+        permissionGateRan = false;
+        const decision = await fire(bashHookContext(cmd, repo));
+        expect(decision).toBeUndefined();
+        expect(permissionGateRan).toBe(true);
+        expect(formatDenyMessage).not.toHaveBeenCalled();
+      }
+    });
+
+    it('allows Bash writes inside worktree', async () => {
+      ix.get(IAgentTowerService);
+
+      const commands = [
+        `cd ${worktree} && echo "hello" > out.txt`,
+        `cd ${worktree} && cp a b`,
+        `cd ${worktree} && mv a b`,
+        `cd ${worktree} && rm file.txt`,
+        `cd ${worktree} && sed -i 's/a/b/' file.txt`,
+        `cd ${worktree} && tee file.txt`,
+        `cd ${worktree} && git checkout -b feat`,
+        `cd ${worktree} && git add .`,
+        `cd ${worktree} && ln -s ${repo}/node_modules ./node_modules`,
+        `git -C ${worktree} checkout -b feat`,
+        'echo "log" > /dev/null',
+        'git status 2>/dev/null',
+        `cd ${worktree} && cat <<'EOF' > notes.md\nx\nEOF`,
+        `cd $(pwd) && rm file.txt`,
+        `sed -i '' -e 's/a/b/' ${worktree}/file.ts`,
+        `cd ${worktree} && bash -lc 'rm file.txt'`,
+        `dd if=/dev/zero of=${worktree}/f`,
+        `find ${worktree} -name x -exec rm {} +`,
+        `ls ${worktree} | xargs -I{} rm {}`,
+        `find ${worktree} -name x -exec perl -i -pe 's/a/b/' {} ;`,
+        `find ${repo} -name '*.json' -exec cp {} ${worktree}/ ;`,
+        'patch --dry-run -p1 < patch.diff',
+        `python3 -c "print(open('${repo}/README.md').read())"`,
+        `tar -czf ${worktree}/x.tar.gz ${repo}/README.md`,
+        `tar -C ${worktree} -xf ${repo}/archive.tar`,
+      ];
+
+      for (const cmd of commands) {
+        formatDenyMessage.mockClear();
+        permissionGateRan = false;
+        const decision = await fire(bashHookContext(cmd, repo));
+        expect(decision).toBeUndefined();
+        expect(permissionGateRan).toBe(true);
+        expect(formatDenyMessage).not.toHaveBeenCalled();
+      }
+    });
+
+    it('does not veto unanalyzable Bash commands on that basis alone', async () => {
+      ix.get(IAgentTowerService);
+
+      const commands = [
+        'echo "unterminated',
+        'cd $UNKNOWN_VAR && rm file.txt',
+      ];
+
+      for (const cmd of commands) {
+        formatDenyMessage.mockClear();
+        permissionGateRan = false;
+        const decision = await fire(bashHookContext(cmd, repo));
+        expect(decision).toBeUndefined();
+        expect(permissionGateRan).toBe(true);
+        expect(formatDenyMessage).not.toHaveBeenCalled();
+      }
+    });
+
+    it('denies Bash redirections writing outside worktree', async () => {
+      ix.get(IAgentTowerService);
+
+      const commands = [
+        `echo "hello" > ${repo}/file.txt`,
+        'echo "hello" > file.txt',
+        `cd ${worktree} && echo "hello" > ${repo}/file.txt`,
+        `echo "hello" >> ${repo}/file.txt`,
+        `echo "err" 2> ${repo}/err.log`,
+        `cat <<EOF > ${repo}/file.txt\nx\nEOF`,
+        `cd ${worktree} && cat <<'EOF' > ${repo}/file.txt\nx\nEOF`,
+        `cat <<EOF >> ${repo}/file.txt\nx\nEOF`,
+        `cat <<EOF 2> ${repo}/file.txt\nx\nEOF`,
+      ];
+
+      for (const cmd of commands) {
+        formatDenyMessage.mockClear();
+        permissionGateRan = false;
+        const decision = await fire(bashHookContext(cmd, repo));
+        expect(decision?.veto?.isError).toBe(true);
+        expect(decision?.veto?.output).toContain(
+          `tower workers may only write inside their own worktree (${worktree})`,
+        );
+        expect(permissionGateRan).toBe(false);
+        expect(formatDenyMessage).toHaveBeenCalledTimes(1);
+      }
+    });
+
+    it('denies file manipulation commands writing outside worktree', async () => {
+      ix.get(IAgentTowerService);
+
+      const commands = [
+        `cp ${worktree}/a ${repo}/b`,
+        `mv ${repo}/a ${worktree}/b`,
+        `rm ${repo}/file.txt`,
+        'rm file.txt',
+        `sed -i 's/a/b/' ${repo}/file.txt`,
+        `tee ${repo}/file.txt`,
+        `ln -s foo ${repo}/link`,
+        `mkdir ${repo}/newdir`,
+        `touch ${repo}/newfile`,
+        `dd of=${repo}/file.txt`,
+        `rsync -a ${worktree}/ ${repo}/`,
+        `install -m 644 a ${repo}/b`,
+        `perl -i -pe 's/a/b/' ${repo}/file.txt`,
+        `curl -o ${repo}/file.txt http://example.test`,
+        `wget -O ${repo}/file.txt http://example.test`,
+        `patch -d ${repo}`,
+        `patch -o ${repo}/file.txt`,
+        'patch -p1 < patch.diff',
+        `chmod 755 ${repo}/file.txt`,
+        `chown root ${repo}/file.txt`,
+        `tar -C ${repo} -xf archive.tar`,
+        `tar -cf ${repo}/backup.tar ${repo}/README.md`,
+        `find ${repo} -delete`,
+        `find ${repo} -exec rm {} +`,
+        `find ${worktree} -name x -exec cp {} ${repo}/ ;`,
+        `find ${worktree} -name x -exec rsync -a {} ${repo}/ ;`,
+        `find ${worktree} -name x -exec env cp {} ${repo}/ ;`,
+        `find ${worktree} -name x -exec env FOO=1 cp {} ${repo}/ ;`,
+        `find ${worktree} -name x -exec sudo cp {} ${repo}/ ;`,
+        `find ${worktree} -name x -exec command cp {} ${repo}/ ;`,
+        `find ${worktree} -name x -exec nohup cp {} ${repo}/ ;`,
+        `find ${worktree} -name x -exec nice cp {} ${repo}/ ;`,
+        `find ${worktree} -name x -exec time cp {} ${repo}/ ;`,
+        `ls ${worktree} | xargs -I{} cp {} ${repo}/x`,
+        `ls ${worktree} | xargs -I{} sudo cp {} ${repo}/x`,
+        `ls ${worktree} | xargs -I{} env cp {} ${repo}/x`,
+        `ls ${worktree} | xargs -I{} install {} ${repo}/`,
+        `find ${repo} -name x -exec perl -i -pe s/a/b/ {} ;`,
+        `timeout 5 rm ${repo}/file.txt`,
+        `timeout 5 sh -c 'rm ${repo}/file.txt'`,
+        `stdbuf -oL rm ${repo}/file.txt`,
+        `setsid rm ${repo}/file.txt`,
+        `$(rm ${repo}/file.txt)`,
+        '`rm ' + `${repo}/file.txt` + '`',
+        `echo hi; $(rm ${repo}/file.txt)`,
+        `echo x > >(tee ${repo}/file.txt)`,
+        `cat <(rm ${repo}/file.txt)`,
+        `xargs -I{} rm ${repo}/{}`,
+        `node -e "fs.writeFileSync('${repo}/file.txt')"`,
+        `node -e "require('fs').openSync('${repo}/file.txt','w')"`,
+        `python3 -c "open('${repo}/file.txt','w')"`,
+        `python3 -c "import os; os.remove('${repo}/file.txt')"`,
+        `bash -lc 'rm ${repo}/file.txt'`,
+        `bash -ec 'rm ${repo}/file.txt'`,
+      ];
+
+      for (const cmd of commands) {
+        formatDenyMessage.mockClear();
+        permissionGateRan = false;
+        const decision = await fire(bashHookContext(cmd, repo));
+        expect(decision?.veto?.isError).toBe(true);
+        expect(decision?.veto?.output).toContain(
+          `tower workers may only write inside their own worktree (${worktree})`,
+        );
+        expect(permissionGateRan).toBe(false);
+        expect(formatDenyMessage).toHaveBeenCalledTimes(1);
+      }
+    });
+
+    it('denies git commands mutating main checkout', async () => {
+      ix.get(IAgentTowerService);
+
+      const commands = [
+        'git checkout main',
+        'git restore file.txt',
+        'git reset HEAD',
+        'git clean -fd',
+        `git -C ${repo} checkout main`,
+        `cd ${worktree} && git checkout -- ${repo}/file.txt`,
+        `cd ${worktree} && git restore ${repo}/file.txt`,
+        `cd ${worktree} && git reset HEAD ${repo}/file.txt`,
+        'git tag v1.0',
+        'git tag -d v1.0',
+        'git branch -D feat',
+        'git branch new-branch',
+        `git -C ${repo} init`,
+        `git -C ${repo} fetch`,
+      ];
+
+      for (const cmd of commands) {
+        formatDenyMessage.mockClear();
+        permissionGateRan = false;
+        const decision = await fire(bashHookContext(cmd, repo));
+        expect(decision?.veto?.isError).toBe(true);
+        expect(decision?.veto?.output).toContain(
+          `tower workers may only write inside their own worktree (${worktree})`,
+        );
+        expect(permissionGateRan).toBe(false);
+        expect(formatDenyMessage).toHaveBeenCalledTimes(1);
+      }
+    });
+
+    it('guards worker Bash writes even while the tower flag is off — isolation is identity-scoped', async () => {
+      towerFlagOn = false;
+      ix.get(IAgentTowerService);
+
+      const decision = await fire(bashHookContext(`rm ${repo}/file.txt`, repo));
+
+      expect(decision?.veto?.isError).toBe(true);
+      expect(decision?.veto?.output).toContain(
+        'tower workers may only write inside their own worktree',
+      );
+      expect(permissionGateRan).toBe(false);
+      expect(formatDenyMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('abstains on Bash when the agent is not a tower worker', async () => {
+      ix.stub(IAgentProfileService, {
+        data: () => ({ profileName: 'coder' }),
+      } as unknown as IAgentProfileService);
+      ix.get(IAgentTowerService);
+
+      const decision = await fire(bashHookContext(`rm ${repo}/file.txt`, repo));
+
+      expect(decision).toBeUndefined();
+      expect(permissionGateRan).toBe(true);
+      expect(formatDenyMessage).not.toHaveBeenCalled();
+    });
+
+    it('enforces worktree sandbox on a subagent spawned by a tower worker', async () => {
+      const SUBAGENT_ID = 'subagent-worker-1';
+      ix.stub(IAgentProfileService, {
+        data: () => ({ profileName: 'explore' }),
+      } as unknown as IAgentProfileService);
+      ix.stub(
+        IAgentScopeContext,
+        makeAgentScopeContext({ agentId: SUBAGENT_ID, agentScope: testWireScope('wire', 'tower-test'), generation: 0 }),
+      );
+      ix.stub(ISessionMetadata, {
+        read: async () => ({
+          id: 'session-main',
+          createdAt: 0,
+          updatedAt: 0,
+          archived: false,
+          agents: {
+            [SUBAGENT_ID]: { parentAgentId: WORKER_AGENT_ID, type: 'sub' },
+          },
+        }),
+      } as unknown as ISessionMetadata);
+      ix.get(IAgentTowerService);
+
+      const deniedDecision = await fire(bashHookContext(`rm ${repo}/file.txt`, repo));
+      expect(deniedDecision?.veto?.isError).toBe(true);
+      expect(deniedDecision?.veto?.output).toContain(
+        `tower workers may only write inside their own worktree (${worktree})`,
+      );
+
+      const allowedDecision = await fire(
+        bashHookContext(`cd ${worktree} && echo "hello" > out.txt`, repo),
+      );
+      expect(allowedDecision).toBeUndefined();
+
+      const writeDenied = await fire(writeHookContext('Write', [`${repo}/file.txt`]));
+      expect(writeDenied?.veto?.isError).toBe(true);
+
+      const writeAllowed = await fire(writeHookContext('Write', [`${worktree}/file.txt`]));
+      expect(writeAllowed).toBeUndefined();
     });
 
     it('guards worker writes even while the tower flag is off — isolation is identity-scoped', async () => {
