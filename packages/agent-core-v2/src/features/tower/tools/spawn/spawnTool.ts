@@ -14,6 +14,8 @@ import {
   TowerProtocolError,
   TowerStore,
   WORKTREES_DIR,
+  branchExists,
+  isRegisteredWorktree,
   isReservedTowerAgentName,
   missionFileName,
   parseFrontmatter,
@@ -25,7 +27,9 @@ import {
 } from '#/features/tower/protocol/index';
 import { IAgentTowerService, TOWER_WORKER_PROFILE } from '#/features/tower/tower';
 import { ITowerRateLimitService } from '#/features/tower/towerRateLimit';
+import { isError2 } from '#/errors';
 import { IConfigService } from '#/app/config/config';
+import { isProviderRateLimitError } from '#/llm-adapter/contract/errors';
 import { IModelCatalog } from '#/llm-adapter/model/catalog';
 import { toInputJsonSchema } from '#/tool/input-schema';
 import {
@@ -37,10 +41,14 @@ import { IAgentLifecycleService, MAIN_AGENT_ID } from '#/session/agentLifecycle/
 import { subagentLabels } from '#/session/agentLifecycle/subagentMetadata';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import {
+  PRIMARY_SUBAGENT_MODEL_CHOICE,
+  buildSubagentModelDescriptions,
+  exposesSubagentModelChoice,
   isSubagentModelForced,
   resolveSubagentBinding,
   resolveSubagentThinking,
   resolveSubagentTimeoutMs,
+  stripSubagentModelParameter,
   wrapSubagentModelError,
 } from '#/session/subagent/configSection';
 import { emitAgentRunSpawned, mirrorAgentRun } from '#/session/subagent/mirrorAgentRun';
@@ -51,6 +59,9 @@ import { SubagentTask, type SubagentHandle } from '#/agent/tools/agent/subagent-
 import { TOWER_MAIN_AGENT_ONLY, TOWER_MODE_USER_ENABLED_ONLY } from '../support';
 import { ITowerSpawnTool, TowerSpawnToolInputSchema, type TowerSpawnToolInput } from './spawn';
 import DESCRIPTION from './spawn.md?raw';
+
+const TOWER_SPAWN_PARAMETERS = toInputJsonSchema(TowerSpawnToolInputSchema);
+const TOWER_SPAWN_PARAMETERS_NO_MODEL = stripSubagentModelParameter(TOWER_SPAWN_PARAMETERS);
 
 type SubagentBinding = ReturnType<typeof resolveSubagentBinding>;
 
@@ -80,8 +91,20 @@ async function findReviewRequest(
 export class TowerSpawnTool implements ITowerSpawnTool {
   declare readonly _serviceBrand: undefined;
   readonly name = 'TowerSpawn' as const;
-  readonly description: string = DESCRIPTION;
-  readonly parameters: Record<string, unknown> = toInputJsonSchema(TowerSpawnToolInputSchema);
+
+  get description(): string {
+    const modelLines = buildSubagentModelDescriptions(
+      this.config,
+      this.profile.data().modelAlias,
+    );
+    return modelLines === undefined ? DESCRIPTION : `${DESCRIPTION}\n\n${modelLines}`;
+  }
+
+  get parameters(): Record<string, unknown> {
+    return exposesSubagentModelChoice(this.config)
+      ? TOWER_SPAWN_PARAMETERS
+      : TOWER_SPAWN_PARAMETERS_NO_MODEL;
+  }
 
   private readonly callerAgentId: string;
 
@@ -116,6 +139,24 @@ export class TowerSpawnTool implements ITowerSpawnTool {
 
   private newStore(): TowerStore {
     return new TowerStore(resolveTowerRepoRoot(this.sessionContext.cwd));
+  }
+
+  private resolveBinding(args: TowerSpawnToolInput): SubagentBinding | undefined {
+    const own = this.profile.data();
+    if (own.modelAlias === undefined) return undefined;
+    const requested = args.model?.trim();
+    const forced = isSubagentModelForced(this.config);
+    const choice =
+      requested !== undefined && requested.length > 0
+        ? requested
+        : args.kind === 'reviewer' && !forced
+          ? PRIMARY_SUBAGENT_MODEL_CHOICE
+          : undefined;
+    return resolveSubagentBinding(
+      this.config,
+      { modelAlias: own.modelAlias, thinkingLevel: own.thinkingLevel },
+      choice,
+    );
   }
 
   private async execution(
@@ -172,6 +213,7 @@ export class TowerSpawnTool implements ITowerSpawnTool {
             isError: true,
           };
         }
+        const worktreeAbs = store.abs(join(WORKTREES_DIR, mission.worktree));
         try {
           const added = await store.addWorktree(mission.worktree, mission.branch, state.base);
           if (added.spawnBase !== undefined) {
@@ -183,14 +225,24 @@ export class TowerSpawnTool implements ITowerSpawnTool {
           }
         } catch (error) {
           if (error instanceof TowerProtocolError) throw error;
-          notes.push(
-            `worktree setup warning (continuing): ${error instanceof Error ? error.message : String(error)}`,
-          );
+          if (!(await isRegisteredWorktree(store.repoRoot, worktreeAbs))) {
+            if (error instanceof GitError) throw error;
+            return {
+              output: `failed to set up worktree for mission "${mission.id}": ${error instanceof Error ? error.message : String(error)}`,
+              isError: true,
+            };
+          }
         }
       } else {
         reviewTarget = args.review_target;
         if (reviewTarget === undefined) {
           return { output: 'reviewer spawns require review_target', isError: true };
+        }
+        if (!(await branchExists(store.repoRoot, reviewTarget))) {
+          return {
+            output: `review_target branch "${reviewTarget}" does not exist in this repository`,
+            isError: true,
+          };
         }
       }
 
@@ -211,6 +263,14 @@ export class TowerSpawnTool implements ITowerSpawnTool {
             ? `${reviewMission.id} review: ${reviewTarget ?? ''}`
             : `review ${args.name}: ${reviewTarget ?? ''}`;
 
+      let binding: SubagentBinding | undefined;
+      try {
+        binding = this.resolveBinding(args);
+      } catch (error) {
+        if (!isError2(error)) throw error;
+        return { output: error.message, isError: true };
+      }
+
       const gate = this.rateLimit.acquire();
       if (!gate.ok) {
         return { output: gate.reason, isError: true };
@@ -218,17 +278,6 @@ export class TowerSpawnTool implements ITowerSpawnTool {
       let slotHeld = true;
       try {
         const controller = new AbortController();
-        const own = this.profile.data();
-        const binding =
-          own.modelAlias === undefined
-            ? undefined
-            : resolveSubagentBinding(
-                this.config,
-                { modelAlias: own.modelAlias, thinkingLevel: own.thinkingLevel },
-                args.kind === 'reviewer' && !isSubagentModelForced(this.config)
-                  ? 'primary'
-                  : undefined,
-              );
         let handle: SubagentHandle;
         try {
           handle = await this.launch(prompt, description, toolCallId, controller, binding);
@@ -255,7 +304,21 @@ export class TowerSpawnTool implements ITowerSpawnTool {
           };
         }
         void handle.completion
-          .catch(() => {})
+          .then(
+            () => {
+              this.rateLimit.reportSuccess();
+            },
+            (error: unknown) => {
+              if (
+                isProviderRateLimitError(error) ||
+                (error instanceof Error &&
+                  error.cause !== undefined &&
+                  isProviderRateLimitError(error.cause))
+              ) {
+                this.rateLimit.reportRateLimited();
+              }
+            },
+          )
           .finally(() => {
             this.rateLimit.release();
           });

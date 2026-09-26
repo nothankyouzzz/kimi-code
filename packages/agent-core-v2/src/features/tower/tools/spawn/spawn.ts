@@ -21,6 +21,12 @@ export const TowerSpawnToolInputSchema = z
       .string()
       .optional()
       .describe('Required for reviewers: the branch to review (e.g. "feat/vulkan-build")'),
+    model: z
+      .string()
+      .optional()
+      .describe(
+        'Which model to run the spawned agent on: one of the aliases listed under "Available models" in this tool description, or "primary" for the tower\'s own model (for hard, quality-sensitive missions). When omitted, a worker binds the configured default model and a reviewer binds the primary model.',
+      ),
     instructions: z
       .string()
       .optional()
