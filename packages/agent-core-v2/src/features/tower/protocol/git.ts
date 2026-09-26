@@ -140,22 +140,49 @@ export async function worktreeRemove(cwd: string, path: string): Promise<void> {
 }
 
 export async function isRegisteredWorktree(repoRoot: string, path: string): Promise<boolean> {
-  const gitDir = await tryGit(path, ['rev-parse', '--git-dir']);
-  if (gitDir === null) return false;
-  const commonDir = await tryGit(repoRoot, ['rev-parse', '--git-common-dir']);
-  if (commonDir === null) return false;
-  const adminRoot = join(
-    await realpath(resolve(await realpath(repoRoot), commonDir.trim())),
-    'worktrees',
-  );
-  const resolved = resolve(await realpath(path), gitDir.trim());
-  const inside = relative(adminRoot, resolved);
-  return inside.length > 0 && !inside.startsWith('..') && !isAbsolute(inside);
+  try {
+    const gitDir = await tryGit(path, ['rev-parse', '--git-dir']);
+    if (gitDir === null) return false;
+    const commonDir = await tryGit(repoRoot, ['rev-parse', '--git-common-dir']);
+    if (commonDir === null) return false;
+    const realRoot = await realpath(repoRoot);
+    const resolvedCommon = resolve(realRoot, commonDir.trim());
+    const realCommon = await realpath(resolvedCommon);
+    const adminRoot = join(realCommon, 'worktrees');
+    let realAdminRoot: string;
+    try {
+      realAdminRoot = await realpath(adminRoot);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
+    }
+    const realPath = await realpath(path);
+    const resolved = resolve(realPath, gitDir.trim());
+    let realResolved = resolved;
+    try {
+      realResolved = await realpath(resolved);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const inside = relative(realAdminRoot, realResolved);
+    return inside.length > 0 && !inside.startsWith('..') && !isAbsolute(inside);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
 }
 
 export async function isWorktreeDirty(path: string): Promise<boolean> {
   const status = await tryGit(path, ['status', '--porcelain']);
   return status !== null && status.trim().length > 0;
+}
+
+export async function isMergeInProgress(cwd: string): Promise<boolean> {
+  return (await tryGit(cwd, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])) !== null;
+}
+
+export async function mergeAbort(cwd: string): Promise<void> {
+  await git(cwd, ['merge', '--abort']);
 }
 
 export async function mergeNoFf(cwd: string, branch: string): Promise<string> {

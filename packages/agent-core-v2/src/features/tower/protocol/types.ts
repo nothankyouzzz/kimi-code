@@ -69,6 +69,25 @@ export interface TowerState {
 export type TowerFindingType = 'bug' | 'improve' | 'vuln' | 'idea';
 export type TowerFindingSeverity = 'low' | 'medium' | 'high' | 'critical';
 
+export interface TowerFindingRecord {
+  readonly file: string;
+  readonly type: TowerFindingType;
+  readonly severity: TowerFindingSeverity;
+  readonly agent: string;
+  readonly mission?: string;
+  readonly date: string;
+  readonly filedDate: string;
+  readonly status: string;
+  readonly dispositionStatus: string;
+  readonly title?: string;
+  readonly note?: string;
+}
+
+export interface TowerFindingDisposition {
+  readonly status: string;
+  readonly note?: string;
+}
+
 export type TowerReviewStatus = 'clean' | `p1-${number}items` | `p2-${number}items`;
 export type TowerReviewMerge = 'merge' | 'fix-then-merge' | 'hold';
 

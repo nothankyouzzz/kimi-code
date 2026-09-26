@@ -18,8 +18,10 @@ import {
   initRepository,
   isAncestor,
   isInsideRepo,
+  isMergeInProgress,
   isRegisteredWorktree,
   isWorktreeDirty,
+  mergeAbort,
   mergeNoFf,
   tryGit,
   worktreeAdd,
@@ -49,6 +51,8 @@ import {
   targetSlug,
 } from './paths';
 import type {
+  TowerFindingDisposition,
+  TowerFindingRecord,
   TowerFindingSeverity,
   TowerFindingType,
   TowerInboxItem,
@@ -191,6 +195,102 @@ export async function assertLocalBaseBranch(repoRoot: string, base: string): Pro
       `base branch "${base}" does not exist as a local branch — merges land on a local branch, so remote-tracking refs and tags are not accepted; create a local branch first`,
     );
   }
+}
+
+function expandBraces(pattern: string): string[] {
+  const match = /\{([^{}]+)\}/.exec(pattern);
+  if (match === null) return [pattern];
+  const prefix = pattern.slice(0, match.index);
+  const suffix = pattern.slice(match.index + match[0].length);
+  const parts = match[1]!.split(',');
+  const results: string[] = [];
+  for (const part of parts) {
+    results.push(...expandBraces(`${prefix}${part}${suffix}`));
+  }
+  return results;
+}
+
+function segmentsOverlap(s1: string, s2: string): boolean {
+  if (s1 === s2) return true;
+  if (s1 === '*' || s2 === '*') return true;
+  const isGlob1 = picomatch.scan(s1).isGlob;
+  const isGlob2 = picomatch.scan(s2).isGlob;
+  if (!isGlob1 && !isGlob2) return s1 === s2;
+  if (!isGlob1) return picomatch(s2)(s1);
+  if (!isGlob2) return picomatch(s1)(s2);
+  if (s1.startsWith('*.') && s2.startsWith('*.')) {
+    return s1.slice(2) === s2.slice(2);
+  }
+  return true;
+}
+
+function globListsOverlap(p1Segments: readonly string[], p2Segments: readonly string[]): boolean {
+  const visited = new Set<string>();
+  function helper(i: number, j: number): boolean {
+    const key = `${String(i)}:${String(j)}`;
+    if (visited.has(key)) return false;
+    visited.add(key);
+
+    if (i === p1Segments.length && j === p2Segments.length) return true;
+    if (i < p1Segments.length && p1Segments[i] === '**') {
+      if (helper(i + 1, j)) return true;
+      if (j < p2Segments.length) {
+        if (helper(i, j + 1)) return true;
+        if (helper(i + 1, j + 1)) return true;
+      }
+      return false;
+    }
+    if (j < p2Segments.length && p2Segments[j] === '**') {
+      if (helper(i, j + 1)) return true;
+      if (i < p1Segments.length) {
+        if (helper(i + 1, j)) return true;
+        if (helper(i + 1, j + 1)) return true;
+      }
+      return false;
+    }
+    if (i < p1Segments.length && j < p2Segments.length) {
+      if (segmentsOverlap(p1Segments[i]!, p2Segments[j]!)) {
+        return helper(i + 1, j + 1);
+      }
+    }
+    return false;
+  }
+  return helper(0, 0);
+}
+
+function singlePatternsOverlap(p1: string, p2: string): boolean {
+  const norm1 = p1.replaceAll(/\/+/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
+  const norm2 = p2.replaceAll(/\/+/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
+  return globListsOverlap(norm1.split('/'), norm2.split('/'));
+}
+
+export function patternsOverlap(p1: string, p2: string): boolean {
+  const expanded1 = expandBraces(p1);
+  const expanded2 = expandBraces(p2);
+  for (const e1 of expanded1) {
+    for (const e2 of expanded2) {
+      if (singlePatternsOverlap(e1, e2)) return true;
+    }
+  }
+  return false;
+}
+
+function isWholeRepoScope(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return true;
+  const normalized = trimmed.replace(/^\.\//, '').replace(/\/+$/, '');
+  if (
+    normalized === '' ||
+    normalized === '.' ||
+    normalized === '*' ||
+    normalized === '**' ||
+    normalized === '**/*' ||
+    normalized === '*/*'
+  ) {
+    return true;
+  }
+  const stem = raw.replace(/\/\*\*?$/, '').replace(/\*$/, '').replace(/\/+$/, '');
+  return stem.length === 0;
 }
 
 export class TowerStore {
@@ -705,17 +805,19 @@ export class TowerStore {
   }
 
   private assertScopesDisjoint(missions: readonly TowerMission[]): void {
-    const scopes: Array<{ readonly id: string; readonly raw: string; readonly stem: string }> = [];
+    const scopes: Array<{ readonly id: string; readonly raw: string }> = [];
     for (const mission of missions) {
       if (mission.kind === 'survey') continue;
+      if (mission.scope.length === 0) {
+        throw new TowerProtocolError(`mission ${mission.id} scope must not be empty`);
+      }
       for (const raw of mission.scope) {
-        const stem = raw.replace(/\/\*\*?$/, '').replace(/\*$/, '').replace(/\/+$/, '');
-        if (stem.length === 0) {
+        if (isWholeRepoScope(raw)) {
           throw new TowerProtocolError(
             `mission ${mission.id} scope "${raw}" covers the whole repo — narrow it down`,
           );
         }
-        scopes.push({ id: mission.id, raw, stem });
+        scopes.push({ id: mission.id, raw });
       }
     }
     for (let i = 0; i < scopes.length; i++) {
@@ -723,7 +825,7 @@ export class TowerStore {
         const a = scopes[i]!;
         const b = scopes[j]!;
         if (a.id === b.id) continue;
-        if (a.stem === b.stem || a.stem.startsWith(`${b.stem}/`) || b.stem.startsWith(`${a.stem}/`)) {
+        if (patternsOverlap(a.raw, b.raw)) {
           throw new TowerProtocolError(
             `mission scopes overlap: ${a.id} ("${a.raw}") vs ${b.id} ("${b.raw}") — split the shared files into exactly one mission; if one of them is stale finished work, abandon it first (TowerMission status=abandoned)`,
           );
@@ -752,6 +854,24 @@ export class TowerStore {
           );
         }
       }
+
+    if (callerName !== TOWER_NAME && patch.status !== undefined) {
+      if (patch.status === 'abandoned') {
+        throw new TowerProtocolError(
+          `agent "${callerName}" cannot abandon mission ${id} — abandoning releases the mission scope, so only the tower does it`,
+        );
+      }
+      if (patch.status === 'merged') {
+        throw new TowerProtocolError(
+          `agent "${callerName}" cannot mark mission ${id} as merged — only the tower merges missions`,
+        );
+      }
+      if (patch.status === 'planned') {
+        throw new TowerProtocolError(
+          `agent "${callerName}" cannot set mission ${id} status to "planned" — only the tower plans missions`,
+        );
+      }
+    }
 
       const isNoOp =
         patch.status === mission.status &&
@@ -795,11 +915,6 @@ export class TowerStore {
         mission.scope = [...patch.scope];
       }
       if (patch.status !== undefined) {
-        if (patch.status === 'abandoned' && callerName !== TOWER_NAME) {
-          throw new TowerProtocolError(
-            `agent "${callerName}" cannot abandon mission ${id} — abandoning releases the mission scope, so only the tower does it`,
-          );
-        }
         mission.status = patch.status;
       }
       if (patch.note !== undefined) mission.notes.push(patch.note);
@@ -839,7 +954,7 @@ export class TowerStore {
         taskDropLog = `dropped task "${task.text}": ${reason}`;
         mission.notes.push(taskDropLog);
       }
-      if (patch.status === 'completed' && patch.blocker === undefined) {
+    if (patch.status === 'completed') {
         await this.assertCompletable(state, mission);
         if (callerName !== TOWER_NAME) {
           await this.assertInboxRead(state, callerName, mission);
@@ -880,6 +995,11 @@ export class TowerStore {
     if (open.length > 0) {
       throw new TowerProtocolError(
         `mission ${mission.id} cannot transition to completed — ${String(open.length)} open task(s): ${open.map((t) => `"${t.text}"`).join(', ')}; tick finished tasks with task_done, or drop legitimately descoped ones with task_drop (a reason is mandatory and lands in the mission notes and the activity log)`,
+      );
+    }
+    if (mission.blockers.length > 0) {
+      throw new TowerProtocolError(
+        `mission ${mission.id} cannot transition to completed while blocked (${mission.blockers.join(', ')}) — clear blockers first`,
       );
     }
     if (mission.kind === 'survey') return;
@@ -1009,6 +1129,35 @@ export class TowerStore {
     return items;
   }
 
+  async countInbox(callerName: string): Promise<number> {
+    let files: string[];
+    try {
+      files = await readdir(this.abs(INBOX_DIR));
+    } catch {
+      return 0;
+    }
+    let count = 0;
+    for (const file of files.filter((f) => f.endsWith('.md'))) {
+      const rel = join(INBOX_DIR, file);
+      let text: string;
+      try {
+        text = await readFile(this.abs(rel), 'utf8');
+      } catch {
+        continue;
+      }
+      const { fields } = parseFrontmatter(text);
+      if (fields['type'] !== 'inbox') continue;
+      const to = fields['to'] ?? '';
+      if (callerName !== TOWER_NAME && to !== callerName && to !== BROADCAST_NAME) continue;
+      count++;
+    }
+    return count;
+  }
+
+  async countVisibleInbox(callerName: string): Promise<number> {
+    return this.countInbox(callerName);
+  }
+
   async fileFinding(callerName: string, input: TowerFindingInput): Promise<string> {
     if (!FINDING_TYPES.includes(input.type)) {
       throw new TowerProtocolError(
@@ -1071,6 +1220,100 @@ export class TowerStore {
     return rel;
   }
 
+  async listFindings(): Promise<readonly TowerFindingRecord[]> {
+    let files: string[];
+    try {
+      files = await readdir(this.abs(FINDINGS_DIR));
+    } catch {
+      return [];
+    }
+    const records: TowerFindingRecord[] = [];
+    for (const file of files.filter((f) => f.endsWith('.md'))) {
+      const rel = join(FINDINGS_DIR, file);
+      let text: string;
+      try {
+        text = await readFile(this.abs(rel), 'utf8');
+      } catch {
+        continue;
+      }
+      const titleMatch = /^# Finding:\s*(.+)$/m.exec(text);
+      const dateMatch = /\*\*Date\*\*:\s*([^\n\r*]+)/.exec(text);
+      const agentMatch = /\*\*Agent\*\*:\s*([^\n\r*]+)/.exec(text);
+      const typeMatch = /\*\*Type\*\*:\s*([^\n\r*]+)/.exec(text);
+      const severityMatch = /\*\*Severity\*\*:\s*([^\n\r*]+)/.exec(text);
+      const missionMatch = /\*\*Mission\*\*:\s*([^\n\r*]+)/.exec(text);
+      const statusMatch =
+        /\*\*Status\*\*:\s*([^\n\r*]+)/.exec(text) ??
+        /\*\*Disposition Status\*\*:\s*([^\n\r*]+)/.exec(text);
+      const noteMatch =
+        /\*\*Disposition Note\*\*:\s*([^\n\r*]+)/.exec(text) ??
+        /\*\*Note\*\*:\s*([^\n\r*]+)/.exec(text);
+
+      const status = statusMatch !== null ? statusMatch[1]!.trim() : 'open';
+      const rawMission = missionMatch?.[1]?.trim();
+      const mission = rawMission === undefined || rawMission === '(none)' ? undefined : rawMission;
+      const date = dateMatch?.[1]?.trim() ?? '';
+
+      records.push({
+        file: rel,
+        type: (typeMatch?.[1]?.trim() ?? 'bug') as TowerFindingType,
+        severity: (severityMatch?.[1]?.trim() ?? 'medium') as TowerFindingSeverity,
+        agent: agentMatch?.[1]?.trim() ?? 'unknown',
+        mission,
+        date,
+        filedDate: date,
+        status,
+        dispositionStatus: status,
+        title: titleMatch?.[1]?.trim(),
+        note: noteMatch?.[1]?.trim(),
+      });
+    }
+    records.sort((a, b) => b.date.localeCompare(a.date) || a.file.localeCompare(b.file));
+    return records;
+  }
+
+  async setFindingDisposition(
+    file: string,
+    statusOrInput: string | TowerFindingDisposition,
+    noteArg?: string,
+  ): Promise<void> {
+    const status = typeof statusOrInput === 'string' ? statusOrInput : statusOrInput.status;
+    const note = typeof statusOrInput === 'string' ? noteArg : (statusOrInput.note ?? noteArg);
+
+    const rel = file.startsWith('.tower') ? file : join(FINDINGS_DIR, file);
+    const absPath = this.abs(rel);
+    let text = await readFile(absPath, 'utf8');
+
+    if (/\*\*Status\*\*:\s*[^\n\r*]+/.test(text)) {
+      text = text.replace(/\*\*Status\*\*:\s*[^\n\r*]+/, `**Status**: ${status}`);
+    } else if (/\*\*Tokens\*\*:[^\n\r]*/.test(text)) {
+      text = text.replace(
+        /(\*\*Tokens\*\*:[^\n\r]*)/,
+        `$1\n**Status**: ${status}${note !== undefined ? `\n**Disposition Note**: ${note}` : ''}`,
+      );
+    } else {
+      text = text.replace(
+        /^(# Finding:[^\n\r]*\n)/m,
+        `$1\n**Status**: ${status}${note !== undefined ? `\n**Disposition Note**: ${note}` : ''}\n`,
+      );
+    }
+
+    if (note !== undefined && !/\*\*Disposition Note\*\*:\s*[^\n\r*]+/.test(text)) {
+      if (/\*\*Status\*\*:[^\n\r]*/.test(text)) {
+        text = text.replace(/(\*\*Status\*\*:[^\n\r]*)/, `$1\n**Disposition Note**: ${note}`);
+      }
+    } else if (note !== undefined) {
+      text = text.replace(/\*\*Disposition Note\*\*:\s*[^\n\r*]+/, `**Disposition Note**: ${note}`);
+    }
+
+    await writeFile(absPath, text, 'utf8');
+    await this.appendLog(TOWER_NAME, 'finding.disposition', {
+      file: rel,
+      status,
+      note,
+    });
+  }
+
   async submitReview(callerName: string, input: TowerReviewInput): Promise<string> {
     return this.withStateLock(async () => {
       const state = await this.load();
@@ -1095,13 +1338,13 @@ export class TowerStore {
       }
 
       const existing = await this.reviewsFor(input.target);
-      const myRounds = existing.filter((r) => r.reviewer === callerName).length;
-      if (myRounds >= MAX_REVIEW_ROUNDS) {
+    const maxRound = existing.reduce((max, r) => Math.max(max, r.round), 0);
+    if (maxRound >= MAX_REVIEW_ROUNDS) {
         throw new TowerProtocolError(
-          `branch "${input.target}" has already been through ${String(MAX_REVIEW_ROUNDS)} review rounds by "${callerName}" — the rework loop is not converging, so another round from the same reviewer is refused; redirect instead: reassign the work (spawn a different worker or a fresh reviewer), split the mission into smaller pieces, or descope it (TowerMission status=abandoned)`,
+        `branch "${input.target}" has already been through ${String(MAX_REVIEW_ROUNDS)} review rounds — the rework loop is not converging, so another round is refused; redirect instead: reassign the work (spawn a different worker or a fresh reviewer), split the mission into smaller pieces, or descope it (TowerMission status=abandoned)`,
         );
       }
-      const round = myRounds + 1;
+    const round = maxRound + 1;
       const seq = await this.nextReviewSeq();
       const reviewedCommit = await branchTip(this.repoRoot, input.target);
       const reviewMissionId =
@@ -1213,9 +1456,9 @@ export class TowerStore {
     }
     reviews.sort(
       (a, b) =>
+        a.round - b.round ||
         (a.seq ?? -1) - (b.seq ?? -1) ||
         a.mtimeMs - b.mtimeMs ||
-        a.round - b.round ||
         a.file.localeCompare(b.file),
     );
     return reviews;
@@ -1223,7 +1466,18 @@ export class TowerStore {
 
   async latestReview(target: string): Promise<TowerReviewInfo | undefined> {
     const reviews = await this.reviewsFor(target);
-    return reviews.at(-1);
+    if (reviews.length === 0) return undefined;
+    let highest = reviews[0]!;
+    for (const r of reviews) {
+      if (r.round > highest.round) {
+        highest = r;
+      } else if (r.round === highest.round) {
+        if ((r.seq ?? -1) > (highest.seq ?? -1) || r.mtimeMs > highest.mtimeMs) {
+          highest = r;
+        }
+      }
+    }
+    return highest;
   }
 
   private async nextReviewSeq(): Promise<number> {
@@ -1308,7 +1562,16 @@ export class TowerStore {
                 r.mission === mission.id || (r.mission === undefined && siblingMissions.length === 0),
             )
           : reviews.filter((r) => r.mission === undefined);
-      const review = candidates.at(-1);
+    let review: TowerReviewInfo | undefined;
+    for (const r of candidates) {
+      if (review === undefined || r.round > review.round) {
+        review = r;
+      } else if (r.round === review.round) {
+        if ((r.seq ?? -1) > (review.seq ?? -1) || r.mtimeMs > review.mtimeMs) {
+          review = r;
+        }
+      }
+    }
       if (review === undefined) {
         throw await block(
           'no-review',
@@ -1321,6 +1584,12 @@ export class TowerStore {
           `merge blocked: latest review (round ${review.round} by ${review.reviewer}) is "${review.status}" — a clean round is required`,
         );
       }
+    if (review.merge === 'hold') {
+      throw await block(
+        'review-hold',
+        `merge blocked: latest review (round ${review.round} by ${review.reviewer}) recommends hold — a clean review with merge verdict is required`,
+      );
+    }
       const tip = await branchTip(this.repoRoot, branch);
       if (review.reviewedCommit !== tip) {
         throw await block(
@@ -1374,7 +1643,18 @@ export class TowerStore {
         }
       }
 
-      const mergeCommit = await mergeNoFf(this.repoRoot, branch);
+    let mergeCommit: string;
+    try {
+      mergeCommit = await mergeNoFf(this.repoRoot, branch);
+    } catch (error) {
+      if (await isMergeInProgress(this.repoRoot)) {
+        await mergeAbort(this.repoRoot);
+      }
+      throw await block(
+        'merge-failed',
+        `merge failed: ${error instanceof Error ? error.message : String(error)} — nothing was merged`,
+      );
+    }
       mission.status = 'merged';
 
       const changedSet = new Set(changed);
