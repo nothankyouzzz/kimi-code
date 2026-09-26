@@ -38,6 +38,12 @@
       "pr": null,
       "status": "active",
       "localOnly": true
+    },
+    {
+      "branch": "local/tower-protocol-hardening",
+      "pr": null,
+      "status": "active",
+      "localOnly": true
     }
   ]
 }
