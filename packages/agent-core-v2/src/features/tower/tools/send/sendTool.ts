@@ -41,8 +41,6 @@ export class TowerSendTool implements ITowerSendTool {
             subject: args.subject,
             body: args.body,
             scope: args.scope,
-            action: args.action,
-            consentRef: args.consent_ref,
             tokens: callerTokens(this.usage, agentContextOfScope(this.scopeContext)),
           });
           if (

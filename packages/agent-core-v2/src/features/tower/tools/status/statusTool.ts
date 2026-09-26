@@ -1,5 +1,6 @@
-import { branchExists, branchTip } from '#/features/tower/protocol/index';
+import { branchExists, branchTip, slugify } from '#/features/tower/protocol/index';
 import type {
+  TowerFindingRecord,
   TowerMission,
   TowerRosterEntry,
   TowerState,
@@ -33,7 +34,6 @@ const STATUS_EMOJI: Record<TowerMission['status'], string> = {
   abandoned: '🚫',
 };
 
-const INBOX_COUNT_LIMIT = 1000;
 const RECENT_LOG_LINES = 10;
 
 export class TowerStatusTool implements ITowerStatusTool {
@@ -74,6 +74,10 @@ export class TowerStatusTool implements ITowerStatusTool {
             '## Review gate (unmerged branches)',
             '',
             ...(await this.renderReviewGate(store, state)),
+            '',
+            '## Findings',
+            '',
+            ...renderFindings(await store.listFindings()),
           ];
 
           if (
@@ -90,12 +94,12 @@ export class TowerStatusTool implements ITowerStatusTool {
             );
           }
 
-          const inbox = await store.readInbox(caller, INBOX_COUNT_LIMIT);
+          const inboxCount = await store.countVisibleInbox(caller);
           sections.push(
             '',
             '## Inbox',
             '',
-            `${String(inbox.length)} message(s) visible to you — read with TowerInbox.`,
+            `${String(inboxCount)} message(s) visible to you — read with TowerInbox.`,
             '',
             '## Concurrency (adaptive)',
             '',
@@ -219,5 +223,43 @@ function renderDeathWarnings(state: TowerState): string[] {
 
 function isStoppedByUser(entry: TowerRosterEntry): boolean {
   return entry.deathReason?.trim() === userCancellationReason().message;
+}
+
+function formatFindingAge(dateStr: string): string {
+  if (!dateStr) return '0d';
+  let dateMs: number;
+  if (/^\d{8}$/.test(dateStr)) {
+    const y = Number(dateStr.slice(0, 4));
+    const m = Number(dateStr.slice(4, 6)) - 1;
+    const d = Number(dateStr.slice(6, 8));
+    dateMs = new Date(y, m, d).getTime();
+  } else {
+    dateMs = Date.parse(dateStr);
+  }
+  if (Number.isNaN(dateMs)) return '0d';
+  const diffDays = Math.max(0, Math.floor((Date.now() - dateMs) / (24 * 60 * 60 * 1000)));
+  return `${String(diffDays)}d`;
+}
+
+function extractFindingSlug(filePath: string): string {
+  const base = filePath.endsWith('.md') ? filePath.slice(0, -3) : filePath;
+  const fileName = base.split('/').pop() ?? base;
+  const parts = fileName.split('-');
+  return parts.length >= 4 ? parts.slice(3).join('-') : fileName;
+}
+
+function renderFindings(findings: readonly TowerFindingRecord[]): string[] {
+  if (findings.length === 0) {
+    return ['0 finding(s)'];
+  }
+  return [
+    `${String(findings.length)} finding(s):`,
+    ...findings.map((f) => {
+      const slug = f.title ? slugify(f.title) : extractFindingSlug(f.file);
+      const age = formatFindingAge(f.date || f.filedDate);
+      const disposition = f.dispositionStatus ?? f.status ?? 'open';
+      return `- ${slug} (${f.type}, ${f.severity}) by ${f.agent}, age ${age} — ${disposition}`;
+    }),
+  ];
 }
 

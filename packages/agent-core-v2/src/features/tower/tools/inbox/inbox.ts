@@ -11,6 +11,20 @@ export const TowerInboxToolInputSchema = z
       .positive()
       .optional()
       .describe('Max messages to return (default 20), newest first'),
+    offset: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe('Number of messages to skip (for paging older messages)'),
+    before: z
+      .string()
+      .optional()
+      .describe('Return only messages sent before this ISO timestamp'),
+    since: z
+      .string()
+      .optional()
+      .describe('Return only messages sent since/after this ISO timestamp'),
   })
   .strict();
 

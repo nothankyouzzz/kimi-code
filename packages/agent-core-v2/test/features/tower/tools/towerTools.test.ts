@@ -157,7 +157,8 @@ beforeEach(async () => {
       reg.definePartialInstance(IAgentTaskService, {
         list: () =>
           liveAgentTaskIds.map(
-            (agentId) => ({ kind: 'agent', agentId }) as unknown as AgentTaskInfo,
+            (agentId) =>
+              ({ kind: 'agent', agentId, taskId: `task-${agentId}` }) as unknown as AgentTaskInfo,
           ),
       });
       reg.define(ITowerInitTool, TowerInitTool);
@@ -567,7 +568,7 @@ describe('TowerSendTool + TowerInboxTool', () => {
     currentAgentId = 'agent-w1';
     const w1Inbox = await run(ix.get(ITowerInboxTool), {});
     expect(w1Inbox.isError).toBeFalsy();
-    expect(w1Inbox.output).toContain('2 message(s) for w1');
+    expect(w1Inbox.output).toContain('2 of 2 message(s) for w1');
     expect(w1Inbox.output).toContain('subject: for w1');
     expect(w1Inbox.output).toContain('subject: broadcast');
     expect(w1Inbox.output).not.toContain('subject: for w2');
@@ -577,7 +578,7 @@ describe('TowerSendTool + TowerInboxTool', () => {
 
     currentAgentId = 'main';
     const towerInbox = await run(ix.get(ITowerInboxTool), {});
-    expect(towerInbox.output).toContain('4 message(s) for tower');
+    expect(towerInbox.output).toContain('4 of 4 message(s) for tower');
     for (const subject of ['for w1', 'for w2', 'broadcast', 'report']) {
       expect(towerInbox.output).toContain(`subject: ${subject}`);
     }
@@ -708,6 +709,55 @@ describe('TowerSendTool + TowerInboxTool', () => {
     expect(accepted.isError).toBeFalsy();
     expect(accepted.output).toContain('status: completed');
   });
+
+  it('reports total visible messages vs shown when inbox is limited and pages with offset', async () => {
+    await run(ix.get(ITowerSendTool), { to: 'w1', subject: 'msg-1', body: 'first' });
+    await run(ix.get(ITowerSendTool), { to: 'w1', subject: 'msg-2', body: 'second' });
+    await run(ix.get(ITowerSendTool), { to: 'w1', subject: 'msg-3', body: 'third' });
+
+    currentAgentId = 'agent-w1';
+    const page1 = await run(ix.get(ITowerInboxTool), { limit: 2, offset: 0 });
+    expect(page1.isError).toBeFalsy();
+    expect(page1.output).toContain('2 of 3 message(s) for w1');
+    expect(page1.output).toContain('subject: msg-3');
+    expect(page1.output).toContain('subject: msg-2');
+    expect(page1.output).not.toContain('subject: msg-1');
+
+    const page2 = await run(ix.get(ITowerInboxTool), { limit: 2, offset: 2 });
+    expect(page2.isError).toBeFalsy();
+    expect(page2.output).toContain('1 of 3 message(s) for w1');
+    expect(page2.output).toContain('subject: msg-1');
+  });
+
+  it('filters inbox by before and since timestamps', async () => {
+    await run(ix.get(ITowerSendTool), { to: 'w1', subject: 'msg-a', body: 'a' });
+
+    currentAgentId = 'agent-w1';
+    const beforeHit = await run(ix.get(ITowerInboxTool), { before: '2999-01-01T00:00:00.000Z' });
+    expect(beforeHit.output).toContain('subject: msg-a');
+
+    const beforeMiss = await run(ix.get(ITowerInboxTool), { before: '2000-01-01T00:00:00.000Z' });
+    expect(beforeMiss.output).toContain('0 of 1 message(s) for w1');
+
+    const sinceHit = await run(ix.get(ITowerInboxTool), { since: '2000-01-01T00:00:00.000Z' });
+    expect(sinceHit.output).toContain('subject: msg-a');
+
+    const sinceMiss = await run(ix.get(ITowerInboxTool), { since: '2999-01-01T00:00:00.000Z' });
+    expect(sinceMiss.output).toContain('0 of 1 message(s) for w1');
+  });
+
+  it('does not write action or consent_ref to inbox frontmatter and ignores dead metadata', async () => {
+    await run(ix.get(ITowerSendTool), { to: 'w1', subject: 'clean-send', body: 'body without dead metadata' });
+    const dir = join(repo, '.tower/comms/inbox');
+    const file = (await readdir(dir)).find((f) => f.includes('clean-send'))!;
+    const content = await readFile(join(dir, file), 'utf8');
+    expect(content).not.toContain('action:');
+    expect(content).not.toContain('consent_ref:');
+
+    currentAgentId = 'agent-w1';
+    const inbox = await run(ix.get(ITowerInboxTool), {});
+    expect(inbox.output).not.toContain('action:');
+  });
 });
 
 describe('TowerStatusTool', () => {
@@ -826,6 +876,189 @@ describe('TowerStatusTool', () => {
     await store.updateMission('tower', 'M1', { status: 'active', owner: 'w-engine' }, { silent: true });
     const settled = await run(ix.get(ITowerStatusTool), {});
     expect(settled.output).not.toContain('## Awaiting spawn');
+  });
+
+  it('renders a Findings section with count, slug, type, severity, agent, age, and disposition', async () => {
+    await initViaTool();
+    const store = new TowerStore(repo);
+    await store.registerAgent({
+      name: 'w1',
+      kind: 'worker',
+      agentId: 'agent-w1',
+      spawnedAt: new Date().toISOString(),
+    });
+
+    await store.fileFinding('w1', {
+      type: 'bug',
+      title: 'Memory leak in listener',
+      severity: 'high',
+      summary: 'Listener not cleaned up',
+      details: 'Event listener retains closure',
+      suggestedFix: 'Call dispose()',
+    });
+
+    const status1 = await run(ix.get(ITowerStatusTool), {});
+    expect(status1.isError).toBeFalsy();
+    expect(status1.output).toContain('## Findings');
+    expect(status1.output).toContain('1 finding(s):');
+    expect(status1.output).toContain('memory-leak-in-listener (bug, high) by w1, age 0d — open');
+
+    await store.setFindingDisposition('memory-leak-in-listener', 'assigned', 'investigating');
+    const status2 = await run(ix.get(ITowerStatusTool), {});
+    expect(status2.output).toContain('memory-leak-in-listener (bug, high) by w1, age 0d — assigned');
+  });
+});
+
+describe('TowerFindingTool', () => {
+  beforeEach(async () => {
+    await initViaTool();
+    const store = new TowerStore(repo);
+    await store.registerAgent({
+      name: 'w1',
+      kind: 'worker',
+      agentId: 'agent-w1',
+      spawnedAt: new Date().toISOString(),
+    });
+  });
+
+  it('files a finding and reports the filed file path', async () => {
+    currentAgentId = 'agent-w1';
+    const result = await run(ix.get(ITowerFindingTool), {
+      type: 'bug',
+      title: 'Null pointer in parse',
+      severity: 'medium',
+      summary: 'Parsed value can be null',
+      details: 'When input is empty, null is returned',
+      suggested_fix: 'Return default object',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.output).toContain('finding filed: .tower/comms/findings/');
+    expect(result.output).toContain('The tower will route it');
+  });
+
+  it('can file a finding with an initial disposition', async () => {
+    currentAgentId = 'agent-w1';
+    const result = await run(ix.get(ITowerFindingTool), {
+      type: 'idea',
+      title: 'Cache parsed ASTs',
+      severity: 'low',
+      summary: 'AST parsing takes 100ms',
+      details: 'LRU cache would speed up builds',
+      suggested_fix: 'Add LRU cache',
+      disposition: 'backlogged',
+      note: 'nice to have in v2',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.output).toContain('disposition: backlogged');
+  });
+
+  it('settles an existing finding by setting disposition and note', async () => {
+    const store = new TowerStore(repo);
+    const rel = await store.fileFinding('w1', {
+      type: 'bug',
+      title: 'Buffer overflow risk',
+      severity: 'critical',
+      summary: 'Buffer size unchecked',
+      details: 'Unchecked copy into fixed buffer',
+      suggestedFix: 'Use safe copy',
+    });
+
+    currentAgentId = 'main';
+    const settle = await run(ix.get(ITowerFindingTool), {
+      file: rel,
+      disposition: 'assigned',
+      note: 'assigned to worker-security',
+    });
+    expect(settle.isError).toBeFalsy();
+    expect(settle.output).toContain('finding disposition updated');
+    expect(settle.output).toContain('assigned');
+    expect(settle.output).toContain('assigned to worker-security');
+
+    const findings = await store.listFindings();
+    const item = findings.find((f) => f.file === rel);
+    expect(item?.status).toBe('assigned');
+    expect(item?.note).toBe('assigned to worker-security');
+  });
+
+  it('settles an existing finding identified by slug', async () => {
+    const store = new TowerStore(repo);
+    await store.fileFinding('w1', {
+      type: 'improve',
+      title: 'Refactor parser loop',
+      severity: 'low',
+      summary: 'Loop is complex',
+      details: 'Cyclomatic complexity is 25',
+      suggestedFix: 'Extract helper methods',
+    });
+
+    currentAgentId = 'main';
+    const settle = await run(ix.get(ITowerFindingTool), {
+      file: 'refactor-parser-loop',
+      disposition: 'dismissed',
+      note: 'not worth the churn',
+    });
+    expect(settle.isError).toBeFalsy();
+    expect(settle.output).toContain('dismissed');
+
+    const findings = await store.listFindings();
+    const item = findings.find((f) => f.title === 'Refactor parser loop');
+    expect(item?.status).toBe('dismissed');
+  });
+
+  it('rejects settling an unmatched finding with a clear guidance message', async () => {
+    currentAgentId = 'main';
+    const missingFile = await run(ix.get(ITowerFindingTool), {
+      file: 'ghost.md',
+      disposition: 'dismissed',
+    });
+    expect(missingFile.isError).toBe(true);
+    expect(missingFile.output).toContain('no finding matches "ghost.md" — pass a file from TowerStatus or a title slug');
+
+    const missingSlug = await run(ix.get(ITowerFindingTool), {
+      file: 'ghost-slug',
+      disposition: 'dismissed',
+    });
+    expect(missingSlug.isError).toBe(true);
+    expect(missingSlug.output).toContain('no finding matches "ghost-slug" — pass a file from TowerStatus or a title slug');
+  });
+
+  it('rejects settling without disposition', async () => {
+    currentAgentId = 'main';
+    const result = await run(ix.get(ITowerFindingTool), {
+      file: 'some-finding.md',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain('disposition (assigned | backlogged | dismissed) is required when settling a finding');
+  });
+
+  it('rejects contradictory calls passing both file and filing fields', async () => {
+    currentAgentId = 'main';
+    const result = await run(ix.get(ITowerFindingTool), {
+      file: 'some-finding.md',
+      disposition: 'assigned',
+      title: 'some new bug',
+      type: 'bug',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain('cannot pass "file" together with finding fields');
+  });
+
+  it('rejects settling a finding outside findings directory', async () => {
+    currentAgentId = 'main';
+    const result = await run(ix.get(ITowerFindingTool), {
+      file: '.tower/../package.json',
+      disposition: 'dismissed',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain('no finding matches ".tower/../package.json"');
+  });
+
+  it('rejects filing without required fields', async () => {
+    currentAgentId = 'agent-w1';
+    const result = await run(ix.get(ITowerFindingTool), {
+      title: 'Incomplete finding',
+    } as any);
+    expect(result.isError).toBe(true);
   });
 });
 

@@ -11,11 +11,6 @@ export const TowerSendToolInputSchema = z
     subject: z.string().describe('One-line subject; keep it greppable'),
     body: z.string().describe('Full message body (markdown)'),
     scope: z.string().optional().describe('Optional scope tag (e.g. the mission id)'),
-    action: z.string().optional().describe('Optional action tag for machine routing'),
-    consent_ref: z
-      .string()
-      .optional()
-      .describe('Optional reference to a consent/approval record this message relies on'),
   })
   .strict();
 

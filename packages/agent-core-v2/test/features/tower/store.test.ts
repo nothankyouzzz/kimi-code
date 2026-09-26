@@ -811,14 +811,17 @@ describe('readInbox', () => {
   });
 
   it('counts visible inbox messages in total', async () => {
-    expect(await store.countInbox('w1')).toBe(2);
-    expect(await store.countInbox('w2')).toBe(2);
-    expect(await store.countInbox('tower')).toBe(4);
     expect(await store.countVisibleInbox('w1')).toBe(2);
+    expect(await store.countVisibleInbox('w2')).toBe(2);
+    expect(await store.countVisibleInbox('tower')).toBe(4);
 
     const limited = await store.readInbox('w1', 1);
     expect(limited).toHaveLength(1);
-    expect(await store.countInbox('w1')).toBe(2);
+    expect(await store.countVisibleInbox('w1')).toBe(2);
+
+    const paged = await store.readInbox('w1', { limit: 1, offset: 1 });
+    expect(paged).toHaveLength(1);
+    expect(paged[0]?.subject).not.toBe(limited[0]?.subject);
   });
 });
 
@@ -1036,6 +1039,14 @@ describe('findings', () => {
     const updated2 = after.find((f) => f.file === rel2);
     expect(updated2?.status).toBe('dismissed');
     expect(updated2?.note).toBe('not needed');
+
+    await expect(
+      store.setFindingDisposition('.tower/../target.md', 'dismissed'),
+    ).rejects.toThrow(/outside \.tower\/comms\/findings/);
+
+    await expect(
+      store.setFindingDisposition('/tmp/outside.md', 'dismissed'),
+    ).rejects.toThrow(/outside \.tower\/comms\/findings/);
   });
 });
 
@@ -1629,7 +1640,7 @@ describe('merge gate', () => {
     expect(after.missions.find((m) => m.id === live.id)?.status).toBe('completed');
   });
 
-  it('selects the review stamped for the mission being merged over higher-round reviews stamped for a closed sibling', async () => {
+  it('selects the review stamped for the mission being merged over reviews stamped for a closed sibling', async () => {
     const [stale] = await store.plan([{ title: 'feature x', scope: ['src/x/**'] }]);
     const state = await store.load();
     await store.addWorktree(stale!.worktree, stale!.branch, state.base);
@@ -1662,7 +1673,7 @@ describe('merge gate', () => {
     expect(after.missions.find((m) => m.id === stale!.id)?.status).toBe('abandoned');
   });
 
-  it('prefers a mission-stamped clean review over a higher-round unstamped legacy review', async () => {
+  it('prefers a mission-stamped clean review over an unstamped legacy review', async () => {
     const [stale] = await store.plan([{ title: 'feature x', scope: ['src/x/**'] }]);
     const state = await store.load();
     await store.addWorktree(stale!.worktree, stale!.branch, state.base);
@@ -2674,7 +2685,7 @@ describe('review round cap', () => {
     }
 
     await expect(nonCleanRound('rev', mission.branch, 'still broken')).rejects.toThrow(
-      /5 review rounds.*redirect instead: reassign/s,
+      /5 review rounds.*redirect instead: move the work to a new mission or branch/s,
     );
 
     const reviews = await store.reviewsFor(mission.branch);
@@ -2696,7 +2707,7 @@ describe('review round cap', () => {
     );
 
     await expect(nonCleanRound('rev-2', mission.branch, 'fresh eyes')).rejects.toThrow(
-      /5 review rounds.*redirect instead: reassign/s,
+      /5 review rounds.*redirect instead: move the work to a new mission or branch/s,
     );
   });
 
@@ -3250,8 +3261,7 @@ describe('addWorktree branch ownership', () => {
     const pristineRepo = await mkdtemp(join(tmpdir(), 'tower-pristine-repo-'));
     await initRepository(pristineRepo);
     await commitAllowEmpty(pristineRepo, 'initial');
-    const arbitraryPath = join(pristineRepo, '.tower/worktrees/wt-1');
-    const result = await isRegisteredWorktree(pristineRepo, arbitraryPath);
+    const result = await isRegisteredWorktree(pristineRepo, pristineRepo);
     expect(result).toBe(false);
     await rm(pristineRepo, { recursive: true, force: true });
   });

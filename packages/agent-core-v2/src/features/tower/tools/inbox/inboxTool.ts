@@ -29,10 +29,21 @@ export class TowerInboxTool implements ITowerInboxTool {
           const store = newTowerStore(this.sessionContext);
           const state = await store.load();
           const caller = callerName(this.scopeContext.agentId, store, state);
-          const items = await store.readInbox(caller, args.limit ?? DEFAULT_LIMIT);
+          const total = await store.countVisibleInbox(caller);
+          const items = await store.readInbox(caller, {
+            limit: args.limit ?? DEFAULT_LIMIT,
+            offset: args.offset,
+            before: args.before,
+            since: args.since,
+          });
           await store.markInboxRead(caller, items[0]?.sentAt);
           if (items.length === 0) {
-            return { output: `inbox empty for ${caller}` };
+            return {
+              output:
+                total === 0
+                  ? `inbox empty for ${caller}`
+                  : `0 of ${String(total)} message(s) for ${caller}`,
+            };
           }
           const sections = items.map((item) =>
             [
@@ -42,14 +53,13 @@ export class TowerInboxTool implements ITowerInboxTool {
               `subject: ${item.subject}`,
               `sent_at: ${item.sentAt}`,
               ...(item.scope !== undefined ? [`scope: ${item.scope}`] : []),
-              ...(item.action !== undefined ? [`action: ${item.action}`] : []),
               '',
               item.body,
             ].join('\n'),
           );
           return {
             output: [
-              `${String(items.length)} message(s) for ${caller} (newest first):`,
+              `${String(items.length)} of ${String(total)} message(s) for ${caller} (newest first):`,
               '',
               sections.join('\n\n---\n\n'),
             ].join('\n'),

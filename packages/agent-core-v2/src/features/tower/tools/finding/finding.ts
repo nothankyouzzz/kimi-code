@@ -5,13 +5,22 @@ import { type AgentTool } from '#/tool/toolContract';
 
 export const TowerFindingToolInputSchema = z
   .object({
-    type: z.enum(['bug', 'improve', 'vuln', 'idea']).describe('Finding category'),
-    title: z.string().describe('Short finding title'),
+    file: z
+      .string()
+      .optional()
+      .describe('Finding file path or title slug to settle (when updating disposition)'),
+    disposition: z
+      .enum(['assigned', 'backlogged', 'dismissed'])
+      .optional()
+      .describe('Disposition status: assigned | backlogged | dismissed'),
+    note: z.string().optional().describe('Disposition note explaining the triage decision'),
+    type: z.enum(['bug', 'improve', 'vuln', 'idea']).optional().describe('Finding category'),
+    title: z.string().optional().describe('Short finding title'),
     severity: z.enum(['low', 'medium', 'high', 'critical']).optional(),
-    summary: z.string().describe('What was found, in a sentence or two'),
+    summary: z.string().optional().describe('What was found, in a sentence or two'),
     location: z.string().optional().describe('File/symbol the finding concerns'),
-    details: z.string().describe('Full details: evidence, reproduction, impact'),
-    suggested_fix: z.string().describe('What you would do about it'),
+    details: z.string().optional().describe('Full details: evidence, reproduction, impact'),
+    suggested_fix: z.string().optional().describe('What you would do about it'),
   })
   .strict();
 

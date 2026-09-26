@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { appendFile, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 import picomatch from 'picomatch';
 
@@ -96,8 +96,6 @@ export interface TowerSendInput {
   readonly subject: string;
   readonly body: string;
   readonly scope?: string;
-  readonly action?: string;
-  readonly consentRef?: string;
   readonly tokens?: number;
 }
 
@@ -1059,8 +1057,6 @@ export class TowerStore {
       subject: input.subject,
       sent_at: new Date().toISOString(),
       scope: input.scope,
-      action: input.action,
-      consent_ref: input.consentRef,
       tokens: String(input.tokens ?? -1),
     });
     const content = `${frontmatter}\n\n${input.body.trim()}\n`;
@@ -1075,12 +1071,37 @@ export class TowerStore {
     return rel;
   }
 
-  async readInbox(callerName: string, limit: number): Promise<readonly TowerInboxItem[]> {
+  async readInbox(
+    callerName: string,
+    limitOrOptions:
+      | number
+      | {
+          readonly limit?: number;
+          readonly offset?: number;
+          readonly before?: string;
+          readonly since?: string;
+        } = 20,
+    offsetArg?: number,
+  ): Promise<readonly TowerInboxItem[]> {
+    const options =
+      typeof limitOrOptions === 'number'
+        ? { limit: limitOrOptions, offset: offsetArg ?? 0 }
+        : {
+            limit: limitOrOptions.limit ?? 20,
+            offset: limitOrOptions.offset ?? 0,
+            before: limitOrOptions.before,
+            since: limitOrOptions.since,
+          };
+    const limit = Math.max(1, options.limit ?? 20);
+    const offset = Math.max(0, options.offset ?? 0);
     const items = (await this.listInboxItems()).filter(
-      (item) => callerName === TOWER_NAME || item.to === callerName || item.to === BROADCAST_NAME,
+      (item) =>
+        (callerName === TOWER_NAME || item.to === callerName || item.to === BROADCAST_NAME) &&
+        (options.before === undefined || item.sentAt < options.before) &&
+        (options.since === undefined || item.sentAt > options.since),
     );
-    items.sort((a, b) => b.sentAt.localeCompare(a.sentAt));
-    return items.slice(0, Math.max(1, limit));
+    items.sort((a, b) => b.sentAt.localeCompare(a.sentAt) || b.file.localeCompare(a.file));
+    return items.slice(offset, offset + limit);
   }
 
   async markInboxRead(callerName: string, newestSeenSentAt?: string): Promise<void> {
@@ -1119,17 +1140,15 @@ export class TowerStore {
         from: fields['from'] ?? 'unknown',
         to: fields['to'] ?? '',
         subject: fields['subject'] ?? '',
-        sentAt: fields['sent_at'] ?? '',
+        sentAt: fields['sent_at'] ?? fields['date'] ?? '',
         scope: fields['scope'],
-        action: fields['action'],
-        consentRef: fields['consent_ref'],
         body,
       });
     }
     return items;
   }
 
-  async countInbox(callerName: string): Promise<number> {
+  async countVisibleInbox(callerName: string): Promise<number> {
     let files: string[];
     try {
       files = await readdir(this.abs(INBOX_DIR));
@@ -1152,10 +1171,6 @@ export class TowerStore {
       count++;
     }
     return count;
-  }
-
-  async countVisibleInbox(callerName: string): Promise<number> {
-    return this.countInbox(callerName);
   }
 
   async fileFinding(callerName: string, input: TowerFindingInput): Promise<string> {
@@ -1277,40 +1292,85 @@ export class TowerStore {
     statusOrInput: string | TowerFindingDisposition,
     noteArg?: string,
   ): Promise<void> {
-    const status = typeof statusOrInput === 'string' ? statusOrInput : statusOrInput.status;
-    const note = typeof statusOrInput === 'string' ? noteArg : (statusOrInput.note ?? noteArg);
+    return this.withStateLock(async () => {
+      const status = typeof statusOrInput === 'string' ? statusOrInput : statusOrInput.status;
+      const note = typeof statusOrInput === 'string' ? noteArg : (statusOrInput.note ?? noteArg);
 
-    const rel = file.startsWith('.tower') ? file : join(FINDINGS_DIR, file);
-    const absPath = this.abs(rel);
-    let text = await readFile(absPath, 'utf8');
-
-    if (/\*\*Status\*\*:\s*[^\n\r*]+/.test(text)) {
-      text = text.replace(/\*\*Status\*\*:\s*[^\n\r*]+/, `**Status**: ${status}`);
-    } else if (/\*\*Tokens\*\*:[^\n\r]*/.test(text)) {
-      text = text.replace(
-        /(\*\*Tokens\*\*:[^\n\r]*)/,
-        `$1\n**Status**: ${status}${note !== undefined ? `\n**Disposition Note**: ${note}` : ''}`,
-      );
-    } else {
-      text = text.replace(
-        /^(# Finding:[^\n\r]*\n)/m,
-        `$1\n**Status**: ${status}${note !== undefined ? `\n**Disposition Note**: ${note}` : ''}\n`,
-      );
-    }
-
-    if (note !== undefined && !/\*\*Disposition Note\*\*:\s*[^\n\r*]+/.test(text)) {
-      if (/\*\*Status\*\*:[^\n\r]*/.test(text)) {
-        text = text.replace(/(\*\*Status\*\*:[^\n\r]*)/, `$1\n**Disposition Note**: ${note}`);
+      const findingsRoot = resolve(this.abs(FINDINGS_DIR));
+      let target = file;
+      if (!isAbsolute(target) && !target.startsWith('.tower') && !target.endsWith('.md')) {
+        try {
+          const entries = await readdir(findingsRoot);
+          const match = entries.find(
+            (f) =>
+              f.endsWith(`-${target}.md`) ||
+              f === `${target}.md` ||
+              basename(f, '.md') === target,
+          );
+          if (match !== undefined) {
+            target = match;
+          }
+        } catch {
+          target = `${target}.md`;
+        }
       }
-    } else if (note !== undefined) {
-      text = text.replace(/\*\*Disposition Note\*\*:\s*[^\n\r*]+/, `**Disposition Note**: ${note}`);
-    }
+      const absPath = isAbsolute(target)
+        ? resolve(target)
+        : target.startsWith('.tower')
+          ? resolve(this.repoRoot, target)
+          : resolve(findingsRoot, target);
 
-    await writeFile(absPath, text, 'utf8');
-    await this.appendLog(TOWER_NAME, 'finding.disposition', {
-      file: rel,
-      status,
-      note,
+      const relFromFindings = relative(findingsRoot, absPath);
+      if (
+        relFromFindings.startsWith('..') ||
+        isAbsolute(relFromFindings) ||
+        relFromFindings === '' ||
+        relFromFindings.includes('/') ||
+        relFromFindings.includes('\\') ||
+        !relFromFindings.endsWith('.md')
+      ) {
+        throw new TowerProtocolError(`finding path "${file}" is outside ${FINDINGS_DIR}`);
+      }
+
+      const rel = relative(this.repoRoot, absPath);
+      let text: string;
+      try {
+        text = await readFile(absPath, 'utf8');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          throw new TowerProtocolError(`finding file "${file}" does not exist`);
+        }
+        throw error;
+      }
+
+      if (/\*\*Status\*\*:\s*[^\n\r*]+/.test(text)) {
+        text = text.replace(/\*\*Status\*\*:\s*[^\n\r*]+/, `**Status**: ${status}`);
+      } else if (/\*\*Tokens\*\*:[^\n\r]*/.test(text)) {
+        text = text.replace(
+          /(\*\*Tokens\*\*:[^\n\r]*)/,
+          `$1\n**Status**: ${status}${note !== undefined ? `\n**Disposition Note**: ${note}` : ''}`,
+        );
+      } else {
+        text = text.replace(
+          /^(# Finding:[^\n\r]*\n)/m,
+          `$1\n**Status**: ${status}${note !== undefined ? `\n**Disposition Note**: ${note}` : ''}\n`,
+        );
+      }
+
+      if (note !== undefined && !/\*\*Disposition Note\*\*:\s*[^\n\r*]+/.test(text)) {
+        if (/\*\*Status\*\*:[^\n\r]*/.test(text)) {
+          text = text.replace(/(\*\*Status\*\*:[^\n\r]*)/, `$1\n**Disposition Note**: ${note}`);
+        }
+      } else if (note !== undefined) {
+        text = text.replace(/\*\*Disposition Note\*\*:\s*[^\n\r*]+/, `**Disposition Note**: ${note}`);
+      }
+
+      await writeFile(absPath, text, 'utf8');
+      await this.appendLog(TOWER_NAME, 'finding.disposition', {
+        file: rel,
+        status,
+        note,
+      });
     });
   }
 
@@ -1341,7 +1401,7 @@ export class TowerStore {
     const maxRound = existing.reduce((max, r) => Math.max(max, r.round), 0);
     if (maxRound >= MAX_REVIEW_ROUNDS) {
         throw new TowerProtocolError(
-        `branch "${input.target}" has already been through ${String(MAX_REVIEW_ROUNDS)} review rounds — the rework loop is not converging, so another round is refused; redirect instead: reassign the work (spawn a different worker or a fresh reviewer), split the mission into smaller pieces, or descope it (TowerMission status=abandoned)`,
+        `branch "${input.target}" has already been through ${String(MAX_REVIEW_ROUNDS)} review rounds — the rework loop is not converging, so another round is refused; redirect instead: move the work to a new mission or branch, split the mission into smaller pieces, or descope it (TowerMission status=abandoned)`,
         );
       }
     const round = maxRound + 1;

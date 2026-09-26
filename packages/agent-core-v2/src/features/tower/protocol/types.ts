@@ -112,7 +112,5 @@ export interface TowerInboxItem {
   readonly subject: string;
   readonly sentAt: string;
   readonly scope?: string;
-  readonly action?: string;
-  readonly consentRef?: string;
   readonly body: string;
 }
