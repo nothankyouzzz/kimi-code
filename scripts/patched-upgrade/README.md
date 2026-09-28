@@ -31,15 +31,21 @@ live copies used at runtime are in `~/.kimi-code/`.
   cherry-pick by taking the patch side; any other conflict fails fast and
   leaves the installed binary untouched. The gate reports every offending
   branch at once — a single run names the full fix list rather than dying on
-  the first conflict. A startup self-check also compares the live hook script
-  and companion skill against their versioned source on `local/upgrade-hook`
-  (`git hash-object` vs the branch blobs): drift warns by default, and
-  `KIMI_UPGRADE_STRICT_SELFCHECK=1` makes a live-script drift fatal (the
-  skill mismatch only ever warns — it does not affect the build). Refresh
-  either with `FORCE=1 bash install.sh`.
-- `install.sh` — installs the script and the companion skill into
-  `~/.kimi-code/` (keeps an existing copy unless `FORCE=1`) and seeds an
-  empty patch registry if none exists.
+  the first conflict. A startup self-check also compares the live hook script,
+  companion skill, and patch registry against their versioned source on
+  `local/upgrade-hook` (blob comparison via `git hash-object` / `git show`, so
+  it does not depend on the branch currently checked out): drift warns by
+  default, and `KIMI_UPGRADE_STRICT_SELFCHECK=1` makes a hook-script or
+  registry drift fatal (the skill mismatch only ever warns — it does not
+  affect the build). The registry comparison covers the patch branch set and
+  each branch's `pr`; `status` and the per-machine `state` are legitimate live
+  data and are excluded. Refresh the script or skill with
+  `FORCE=1 bash install.sh`, the registry with a plain `bash install.sh`.
+- `install.sh` — installs the script, the companion skill, and the bundled
+  patch registry into `~/.kimi-code/`. The script and skill keep an existing
+  copy unless `FORCE=1`; the registry is always reinstalled, backing up the
+  existing copy first — that copy is how a registry change reaches the live
+  setup. It also records this checkout's path in `state.repoPath`.
 - `test/smoke.sh` — standalone smoke tests running the pipeline under
   `DRY_RUN=1` against temporary state files and fixture branches to assert
   the clean path, the multi-conflict gate, and self-check drift tiers.
@@ -53,11 +59,14 @@ live copies used at runtime are in `~/.kimi-code/`.
 
 ## The patch registry
 
-`~/.kimi-code/local-patches.json` is live-only config and is deliberately NOT
-versioned in the repo: its contents describe branches (already git refs,
-recoverable from the fork's branch list and `gh pr list`), and committing
-registry bookkeeping to `local/upgrade-hook` would change that branch's head
-and force a pointless binary rebuild. Format:
+The registry is versioned at `scripts/patched-upgrade/local-patches.json` on
+`local/upgrade-hook`, and that bundled copy is canonical for this patch set:
+a new machine picks the patch list up from it, and every `install.sh` run
+copies it over `~/.kimi-code/local-patches.json` (backing up the existing
+copy first). The pipeline reads the live copy at runtime, so changing the
+patch set means editing the versioned file and re-running `install.sh`.
+A live copy whose branch set or per-branch `pr` differs from the bundled one
+is reported by the self-check described above. Format:
 
 ```json
 {
@@ -82,9 +91,13 @@ and force a pointless binary rebuild. Format:
 - `localOnly`: informational — the branch is never pushed anywhere except
   the fork.
 
-The script additionally writes per-machine `state` (base release, binary
-hash, build time) into this file, which is another reason it stays out of
-git.
+Per-machine `state` exists only in the live copy: `install.sh` re-records
+`state.repoPath` after copying, and the pipeline writes the base release,
+binary hash, patch fingerprint, and build time. The self-check excludes
+`state` as per-machine data, which is why the versioned registry never carries
+machine-specific paths. Since the copy replaces the file as a whole, the
+recorded build state does not survive an `install.sh` run — the next pipeline
+run rebuilds.
 
 ## Setup on a new machine
 
@@ -92,8 +105,8 @@ git.
 cd ~/workspace/kimi-code
 git fetch origin
 git checkout local/upgrade-hook        # or: git show origin/local/upgrade-hook:scripts/patched-upgrade/...
-scripts/patched-upgrade/install.sh
-$EDITOR ~/.kimi-code/local-patches.json  # list your patch branches
+$EDITOR scripts/patched-upgrade/local-patches.json  # list your patch branches
+scripts/patched-upgrade/install.sh     # installs script, skill, and registry into ~/.kimi-code
 kimi upgrade                           # rebuilds the patched binary
 ```
 
