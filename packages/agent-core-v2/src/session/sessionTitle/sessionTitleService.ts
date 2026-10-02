@@ -26,7 +26,7 @@ import { createUserMessage, extractText } from '#/llm-adapter/contract/message';
 
 import { IAgentTitlePromptSource } from './agentTitlePromptSource';
 import {
-  isSessionTitleEnabled,
+  autoSessionTitleEnabled,
   resolveSessionTitleModelAlias,
   resolveSessionTitleRequester,
 } from './configSection';
@@ -93,7 +93,7 @@ export class SessionTitleService implements ISessionTitleService {
     force: boolean,
     source: SessionTitleSource,
   ): Promise<string | undefined> {
-    if (!isSessionTitleEnabled(this.config)) return undefined;
+    if (!autoSessionTitleEnabled(this.config)) return undefined;
     const current = await this.metadata.read();
     if (!force) {
       if (current.titleKind === 'custom') return undefined;

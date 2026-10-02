@@ -299,16 +299,14 @@ Configuration errors fail loudly instead of falling back silently. Session creat
 
 ## `session_title`
 
-AI session title generation. Clients request a short title for the session once the first turn completes, and the rename field or `/title generate` can force a regeneration at any time. Set `enabled = false` to keep the local first-prompt excerpt as the title instead.
+AI session title generation. Clients request a short title for the session once the first turn completes, and the rename field or `/title generate` can force a regeneration at any time. Set the top-level `auto_session_title = false` to keep the local first-prompt excerpt as the title instead.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `enabled` | `boolean` | `true` | Set to `false` to disable AI session title generation |
 | `model` | `string` | — | Model used to generate the title — a [`[models]`](#models) id or alias. When set, generation goes through this model; when unset, generation uses the managed `chat_title` tool of a signed-in Kimi Code account |
 
 ```toml
 [session_title]
-enabled = true
 model = "kimi-code/kimi-for-coding-highspeed"
 ```
 

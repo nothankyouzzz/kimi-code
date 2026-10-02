@@ -5,20 +5,23 @@ import type { IConfigService } from '#/app/config/config';
 import { IModelCatalog } from '#/llm-adapter/model/catalog';
 import type { ModelRequester } from '#/llm-adapter/model/model-requester';
 
+export const AUTO_SESSION_TITLE_SECTION = 'autoSessionTitle';
+export const AutoSessionTitleConfigSchema = z.boolean().optional();
+registerConfigSection(AUTO_SESSION_TITLE_SECTION, AutoSessionTitleConfigSchema);
+
+export function autoSessionTitleEnabled(config: IConfigService): boolean {
+  return config.get<boolean>(AUTO_SESSION_TITLE_SECTION) !== false;
+}
+
 export const SESSION_TITLE_SECTION = 'sessionTitle';
 
 export const SessionTitleConfigSchema = z.object({
-  enabled: z.boolean().optional(),
   model: z.string().min(1).optional(),
 });
 
 export type SessionTitleConfig = z.infer<typeof SessionTitleConfigSchema>;
 
 registerConfigSection(SESSION_TITLE_SECTION, SessionTitleConfigSchema);
-
-export function isSessionTitleEnabled(config: IConfigService): boolean {
-  return config.get<SessionTitleConfig | undefined>(SESSION_TITLE_SECTION)?.enabled !== false;
-}
 
 export function resolveSessionTitleModelAlias(config: IConfigService): string | undefined {
   const model = config.get<SessionTitleConfig | undefined>(SESSION_TITLE_SECTION)?.model;

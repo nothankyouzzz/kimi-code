@@ -298,16 +298,14 @@ k3-max = "同一模型的 max Thinking 档位。适合最难的子任务。"
 
 ## `session_title`
 
-AI 会话标题生成。客户端会在首轮对话完成后为会话请求生成一个简短标题，重命名框或 `/title generate` 可以随时强制重新生成。设为 `enabled = false` 时，会话标题保持本地取首条 prompt 的摘要。
+AI 会话标题生成。客户端会在首轮对话完成后为会话请求生成一个简短标题，重命名框或 `/title generate` 可以随时强制重新生成。在顶层设置 `auto_session_title = false` 时，会话标题保持本地取首条 prompt 的摘要。
 
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `enabled` | `boolean` | `true` | 设为 `false` 可关闭 AI 会话标题生成 |
 | `model` | `string` | — | 用于生成标题的模型——[`[models]`](#models) 条目的 id 或别名。设置后标题由该模型生成；未设置时，使用已登录 Kimi Code 账号的托管 `chat_title` 工具 |
 
 ```toml
 [session_title]
-enabled = true
 model = "kimi-code/kimi-for-coding-highspeed"
 ```
 

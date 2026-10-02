@@ -40,6 +40,7 @@ import { IModelCatalog, type Model } from '#/llm-adapter/model/catalog';
 import type { ModelRequester, ModelRequestEvent } from '#/llm-adapter/model/model-requester';
 import { createAssistantMessage } from '#/llm-adapter/contract/message';
 import {
+  AUTO_SESSION_TITLE_SECTION,
   SESSION_TITLE_SECTION,
   type SessionTitleConfig,
 } from '#/session/sessionTitle/configSection';
@@ -153,6 +154,7 @@ describe('SessionTitleService', () => {
   let digestExcerpt: TitleDigestExcerpt;
   let tokenCalls: boolean[];
   let sessionTitleConfig: SessionTitleConfig | undefined;
+  let autoSessionTitleConfig: boolean | undefined;
   let catalogRequesters: Map<string, ModelRequester>;
   let catalogFindByName: (name: string) => readonly string[];
   let modelTitle: string | undefined;
@@ -169,6 +171,7 @@ describe('SessionTitleService', () => {
     digestExcerpt = { turns: [] };
     tokenCalls = [];
     sessionTitleConfig = undefined;
+    autoSessionTitleConfig = undefined;
     catalogRequesters = new Map();
     catalogFindByName = () => [];
     modelTitle = undefined;
@@ -238,8 +241,11 @@ describe('SessionTitleService', () => {
           thirdPartyHeaders: {},
         });
         reg.definePartialInstance(IConfigService, {
-          get: <T>(domain: string) =>
-            (domain === SESSION_TITLE_SECTION ? sessionTitleConfig : undefined) as T,
+          get: <T>(domain: string) => {
+            if (domain === AUTO_SESSION_TITLE_SECTION) return autoSessionTitleConfig as T;
+            if (domain === SESSION_TITLE_SECTION) return sessionTitleConfig as T;
+            return undefined as T;
+          },
         });
         reg.definePartialInstance(IModelCatalog, {
           getRequester: (id: string) => {
@@ -626,7 +632,7 @@ describe('SessionTitleService', () => {
 
   describe('with a configured [session_title].model', () => {
     beforeEach(() => {
-      sessionTitleConfig = { enabled: true, model: 'title-model' };
+      sessionTitleConfig = { model: 'title-model' };
       modelTitle = '模型生成的标题';
       catalogRequesters.set('title-model', createFakeRequester());
     });
@@ -707,11 +713,24 @@ describe('SessionTitleService', () => {
       expect(metadata.meta.titleKind).toBe('generated');
     });
 
-    it('stays disabled when [session_title].enabled is false', async () => {
-      sessionTitleConfig = { enabled: false, model: 'title-model' };
+    it('stays disabled when auto_session_title is false', async () => {
+      autoSessionTitleConfig = false;
+      sessionTitleConfig = { model: 'title-model' };
 
       await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
       expect(modelRequestCalls).toBe(0);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('generates by default when auto_session_title is unset', async () => {
+      titlePrompts = ['hello'];
+      autoSessionTitleConfig = undefined;
+      sessionTitleConfig = { model: 'title-model' };
+
+      const title = await ix.get(ISessionTitleService).generateTitle();
+
+      expect(title).toBe('模型生成的标题');
+      expect(modelRequestCalls).toBe(1);
       expect(fetchMock).not.toHaveBeenCalled();
     });
   });
