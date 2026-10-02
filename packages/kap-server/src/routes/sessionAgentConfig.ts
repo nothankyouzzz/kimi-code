@@ -57,7 +57,7 @@ export async function applySessionAgentConfig(
   if (agentConfig.tower_mode !== undefined) {
     const tower = agent.accessor.get(IAgentTowerService);
     if (agentConfig.tower_mode) {
-      const result = await tower.enter(agentConfig.tower_base);
+      const result = await tower.enter(agentConfig.tower_base, agentConfig.tower_dir);
       if (!result.entered) {
         throw new Error2(
           ErrorCodes.SESSION_TOWER_MODE_INVALID,

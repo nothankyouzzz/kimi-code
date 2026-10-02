@@ -1,7 +1,7 @@
 import { IAgentScopeContext, agentContextOfScope } from '#/agent/scopeContext/scopeContext';
 import { IAgentTaskService } from '#/agent/task/task';
+import { IAgentTowerService } from '#/features/tower/tower';
 import { ISessionEventBus } from '#/app/event/eventBus';
-import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionUsageService } from '#/session/usage/sessionUsage';
 import { toInputJsonSchema } from '#/tool/input-schema';
 import type { ToolExecution } from '#/tool/toolContract';
@@ -19,7 +19,7 @@ export class TowerSendTool implements ITowerSendTool {
   readonly parameters: Record<string, unknown> = toInputJsonSchema(TowerSendToolInputSchema);
 
   constructor(
-    @ISessionContext private readonly sessionContext: ISessionContext,
+    @IAgentTowerService private readonly tower: IAgentTowerService,
     @IAgentScopeContext private readonly scopeContext: IAgentScopeContext,
     @ISessionEventBus private readonly sessionBus: ISessionEventBus,
     @IAgentTaskService private readonly tasks: IAgentTaskService,
@@ -32,7 +32,7 @@ export class TowerSendTool implements ITowerSendTool {
       approvalRule: this.name,
       execute: () =>
         runTowerTool(async () => {
-          const store = newTowerStore(this.sessionContext);
+          const store = newTowerStore(this.tower);
           const state = await store.load();
           const caller = callerName(this.scopeContext.agentId, store, state);
           const to = args.to.trim();

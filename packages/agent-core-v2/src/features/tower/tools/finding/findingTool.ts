@@ -1,5 +1,5 @@
 import { IAgentScopeContext, agentContextOfScope } from '#/agent/scopeContext/scopeContext';
-import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { IAgentTowerService } from '#/features/tower/tower';
 import { ISessionUsageService } from '#/session/usage/sessionUsage';
 import { TowerProtocolError, slugify } from '#/features/tower/protocol/index';
 import { toInputJsonSchema } from '#/tool/input-schema';
@@ -20,7 +20,7 @@ export class TowerFindingTool implements ITowerFindingTool {
   readonly parameters: Record<string, unknown> = toInputJsonSchema(TowerFindingToolInputSchema);
 
   constructor(
-    @ISessionContext private readonly sessionContext: ISessionContext,
+    @IAgentTowerService private readonly tower: IAgentTowerService,
     @IAgentScopeContext private readonly scopeContext: IAgentScopeContext,
     @ISessionUsageService private readonly usage: ISessionUsageService,
   ) {}
@@ -34,7 +34,7 @@ export class TowerFindingTool implements ITowerFindingTool {
       approvalRule: this.name,
       execute: () =>
         runTowerTool(async () => {
-          const store = newTowerStore(this.sessionContext);
+          const store = newTowerStore(this.tower);
           const state = await store.load();
           const caller = callerName(this.scopeContext.agentId, store, state);
 

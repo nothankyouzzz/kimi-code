@@ -1,5 +1,5 @@
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
-import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { IAgentTowerService } from '#/features/tower/tower';
 import { toInputJsonSchema } from '#/tool/input-schema';
 import type { ToolExecution } from '#/tool/toolContract';
 
@@ -16,7 +16,7 @@ export class TowerInboxTool implements ITowerInboxTool {
   readonly parameters: Record<string, unknown> = toInputJsonSchema(TowerInboxToolInputSchema);
 
   constructor(
-    @ISessionContext private readonly sessionContext: ISessionContext,
+    @IAgentTowerService private readonly tower: IAgentTowerService,
     @IAgentScopeContext private readonly scopeContext: IAgentScopeContext,
   ) {}
 
@@ -26,7 +26,7 @@ export class TowerInboxTool implements ITowerInboxTool {
       approvalRule: this.name,
       execute: () =>
         runTowerTool(async () => {
-          const store = newTowerStore(this.sessionContext);
+          const store = newTowerStore(this.tower);
           const state = await store.load();
           const caller = callerName(this.scopeContext.agentId, store, state);
           const total = await store.countVisibleInbox(caller);

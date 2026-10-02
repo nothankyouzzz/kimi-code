@@ -1,6 +1,6 @@
 import { IAgentScopeContext, agentContextOfScope } from '#/agent/scopeContext/scopeContext';
 import { resolveMissionByBranch } from '#/features/tower/protocol/index';
-import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { IAgentTowerService } from '#/features/tower/tower';
 import { ISessionUsageService } from '#/session/usage/sessionUsage';
 import { toInputJsonSchema } from '#/tool/input-schema';
 import type { ToolExecution } from '#/tool/toolContract';
@@ -20,7 +20,7 @@ export class TowerReviewTool implements ITowerReviewTool {
   readonly parameters: Record<string, unknown> = toInputJsonSchema(TowerReviewToolInputSchema);
 
   constructor(
-    @ISessionContext private readonly sessionContext: ISessionContext,
+    @IAgentTowerService private readonly tower: IAgentTowerService,
     @IAgentScopeContext private readonly scopeContext: IAgentScopeContext,
     @ISessionUsageService private readonly usage: ISessionUsageService,
   ) {}
@@ -31,7 +31,7 @@ export class TowerReviewTool implements ITowerReviewTool {
       approvalRule: this.name,
       execute: () =>
         runTowerTool(async () => {
-          const store = newTowerStore(this.sessionContext);
+          const store = newTowerStore(this.tower);
           const state = await store.load();
           const caller = callerName(this.scopeContext.agentId, store, state);
           const rel = await store.submitReview(caller, {

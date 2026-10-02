@@ -138,6 +138,9 @@ describe('TowerSpawnTool', () => {
       get requestedBase() {
         return undefined;
       },
+      get workspaceRoot() {
+        return repo;
+      },
       enter: () => Promise.resolve({ entered: true as const }),
       exit: () => {},
     } as unknown as IAgentTowerService);

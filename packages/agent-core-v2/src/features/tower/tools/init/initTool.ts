@@ -47,7 +47,10 @@ export class TowerInitTool implements ITowerInitTool {
       approvalRule: this.name,
       execute: () =>
         runTowerTool(async () => {
-          const store = newTowerStore(this.sessionContext);
+          if (args.dir !== undefined) {
+            await this.tower.setWorkspaceDir(args.dir);
+          }
+          const store = newTowerStore(this.tower);
           const priorOwner = await store.load().then(
             (state) => state.sessionId,
             () => undefined,

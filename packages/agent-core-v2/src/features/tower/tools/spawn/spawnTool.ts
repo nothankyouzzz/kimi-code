@@ -20,7 +20,6 @@ import {
   missionFileName,
   parseFrontmatter,
   resolveMissionByBranch,
-  resolveTowerRepoRoot,
   type TowerInboxItem,
   type TowerMission,
   type TowerState,
@@ -138,7 +137,7 @@ export class TowerSpawnTool implements ITowerSpawnTool {
   }
 
   private newStore(): TowerStore {
-    return new TowerStore(resolveTowerRepoRoot(this.sessionContext.cwd));
+    return new TowerStore(this.tower.workspaceRoot);
   }
 
   private resolveBinding(args: TowerSpawnToolInput): SubagentBinding | undefined {

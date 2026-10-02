@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -32,7 +33,7 @@ import type {
 } from '#/agent/toolExecutor/toolHooks';
 import { IBashParserService } from '#/app/bashParser/bashParser';
 import { BashParserService } from '#/app/bashParser/bashParserService';
-import { STATE_FILE, TowerStore, type TowerState } from '#/features/tower/protocol/index';
+import { STATE_FILE, TowerProtocolError, TowerStore, type TowerState } from '#/features/tower/protocol/index';
 import { TowerSendTool } from '#/features/tower/tools/send/sendTool';
 import { TOWER_MODE_USER_ENABLED_ONLY } from '#/features/tower/tools/support';
 import {
@@ -383,6 +384,97 @@ describe('AgentTowerService', () => {
       expect(tower.requestedBase).toBeUndefined();
     } finally {
       await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('enter(base, dir) records the requested dir and store resolves there; exit clears it', async () => {
+    const sessionRepo = await mkdtemp(join(tmpdir(), 'tower-session-repo-'));
+    const targetRepo = await mkdtemp(join(tmpdir(), 'tower-target-repo-'));
+    try {
+      await initGitRepo(sessionRepo);
+      await initGitRepo(targetRepo);
+      await writeFile(join(targetRepo, 'README.md'), '# target\n');
+      await execFileAsync('git', ['add', 'README.md'], { cwd: targetRepo });
+      await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: targetRepo });
+      ix.stub(ISessionContext, { cwd: sessionRepo, sessionId: 'session-dir-test' } as unknown as ISessionContext);
+      const tower = ix.get(IAgentTowerService);
+
+      expect(tower.requestedDir).toBeUndefined();
+      expect(tower.workspaceRoot).toBe(sessionRepo);
+
+      await tower.enter(undefined, targetRepo);
+
+      expect(tower.isActive).toBe(true);
+      expect(tower.requestedDir).toBe(targetRepo);
+      expect(tower.workspaceRoot).toBe(targetRepo);
+
+      await tower.exit();
+      expect(tower.requestedDir).toBeUndefined();
+      expect(tower.workspaceRoot).toBe(sessionRepo);
+    } finally {
+      await rm(sessionRepo, { recursive: true, force: true });
+      await rm(targetRepo, { recursive: true, force: true });
+    }
+  });
+
+  it('re-entering with a new base keeps a previously requested custom dir', async () => {
+    const sessionRepo = await mkdtemp(join(tmpdir(), 'tower-session-repo-'));
+    const targetRepo = await mkdtemp(join(tmpdir(), 'tower-target-repo-'));
+    try {
+      await initGitRepo(sessionRepo);
+      await initGitRepo(targetRepo);
+      await writeFile(join(targetRepo, 'README.md'), '# target\n');
+      await execFileAsync('git', ['add', 'README.md'], { cwd: targetRepo });
+      await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: targetRepo });
+      ix.stub(ISessionContext, { cwd: sessionRepo, sessionId: 'session-dir-base-test' } as unknown as ISessionContext);
+      const tower = ix.get(IAgentTowerService);
+
+      await tower.enter(undefined, targetRepo);
+      expect(tower.requestedDir).toBe(targetRepo);
+      expect(tower.workspaceRoot).toBe(targetRepo);
+
+      await tower.enter('feature-base');
+      expect(tower.requestedBase).toBe('feature-base');
+      expect(tower.requestedDir).toBe(targetRepo);
+      expect(tower.workspaceRoot).toBe(targetRepo);
+
+      const state = await new TowerStore(targetRepo).load();
+      expect(state.base).toBe('feature-base');
+    } finally {
+      await rm(sessionRepo, { recursive: true, force: true });
+      await rm(targetRepo, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a nonexistent dir with TowerProtocolError and performs no git init', async () => {
+    const sessionRepo = await mkdtemp(join(tmpdir(), 'tower-session-repo-'));
+    const nonexistent = join(sessionRepo, 'does-not-exist');
+    try {
+      await initGitRepo(sessionRepo);
+      ix.stub(ISessionContext, { cwd: sessionRepo, sessionId: 'session-fail-test' } as unknown as ISessionContext);
+      const tower = ix.get(IAgentTowerService);
+
+      await expect(tower.enter(undefined, nonexistent)).rejects.toThrow(TowerProtocolError);
+      expect(existsSync(join(nonexistent, '.git'))).toBe(false);
+      expect(existsSync(nonexistent)).toBe(false);
+    } finally {
+      await rm(sessionRepo, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a non-git dir with TowerProtocolError and performs no git init', async () => {
+    const sessionRepo = await mkdtemp(join(tmpdir(), 'tower-session-repo-'));
+    const plainDir = await mkdtemp(join(tmpdir(), 'tower-plain-dir-'));
+    try {
+      await initGitRepo(sessionRepo);
+      ix.stub(ISessionContext, { cwd: sessionRepo, sessionId: 'session-nongit-test' } as unknown as ISessionContext);
+      const tower = ix.get(IAgentTowerService);
+
+      await expect(tower.enter(undefined, plainDir)).rejects.toThrow(TowerProtocolError);
+      expect(existsSync(join(plainDir, '.git'))).toBe(false);
+    } finally {
+      await rm(sessionRepo, { recursive: true, force: true });
+      await rm(plainDir, { recursive: true, force: true });
     }
   });
 
@@ -3106,7 +3198,7 @@ describe('AgentTowerService', () => {
       input: { to: string; subject: string; body: string },
     ): Promise<void> {
       const tool = new TowerSendTool(
-        { cwd: repo } as unknown as ISessionContext,
+        { workspaceRoot: repo } as unknown as IAgentTowerService,
         makeAgentScopeContext({ agentId, agentScope: testWireScope('wire', 'tower-test'), generation: 0 }),
         bus,
         { list: () => [] } as unknown as IAgentTaskService,

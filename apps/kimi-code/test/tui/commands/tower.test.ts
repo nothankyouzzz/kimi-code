@@ -88,6 +88,18 @@ describe('handleTowerCommand', () => {
     expect(host.sendNormalUserInput).not.toHaveBeenCalled();
   });
 
+  it('turns tower mode on with an explicit directory', async () => {
+    const { host, session } = makeHost({ towerMode: false });
+
+    await handleTowerCommand(host, 'on /path/to/repo');
+
+    expect(session.setTowerMode).toHaveBeenCalledWith(true, undefined, '/path/to/repo');
+    expect(host.setAppState).toHaveBeenCalledWith({ towerMode: true });
+    expect(host.showNotice).toHaveBeenCalledWith('Tower mode: ON (dir: /path/to/repo)');
+    expect(host.showError).not.toHaveBeenCalled();
+    expect(host.sendNormalUserInput).not.toHaveBeenCalled();
+  });
+
   it('turns tower mode off with an explicit off subcommand', async () => {
     const { host, session } = makeHost({ towerMode: true });
 

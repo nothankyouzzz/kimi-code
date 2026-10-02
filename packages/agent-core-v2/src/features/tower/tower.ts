@@ -60,8 +60,11 @@ export interface IAgentTowerService {
 
   readonly isActive: boolean;
   readonly requestedBase: string | undefined;
-  enter(base?: string): Promise<TowerEnterResult>;
+  readonly requestedDir: string | undefined;
+  readonly workspaceRoot: string;
+  enter(base?: string, dir?: string): Promise<TowerEnterResult>;
   exit(reason?: TowerExitReason): Promise<void>;
+  setWorkspaceDir(dir: string): Promise<string>;
 }
 
 export const IAgentTowerService = createDecorator<IAgentTowerService>('agentTowerService');

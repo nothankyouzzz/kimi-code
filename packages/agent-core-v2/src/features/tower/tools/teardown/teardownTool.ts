@@ -1,5 +1,6 @@
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentTaskService } from '#/agent/task/task';
+import { IAgentTowerService } from '#/features/tower/tower';
 import { ISessionManager } from '#/app/sessionManager/sessionManager';
 import { TowerProtocolError } from '#/features/tower/protocol/index';
 import { MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
@@ -23,6 +24,7 @@ export class TowerTeardownTool implements ITowerTeardownTool {
 
   constructor(
     @ISessionContext private readonly sessionContext: ISessionContext,
+    @IAgentTowerService private readonly tower: IAgentTowerService,
     @ISessionManager private readonly sessions: ISessionManager,
     @IAgentScopeContext private readonly scopeContext: IAgentScopeContext,
     @IAgentTaskService private readonly tasks: IAgentTaskService,
@@ -40,7 +42,7 @@ export class TowerTeardownTool implements ITowerTeardownTool {
       approvalRule: this.name,
       execute: () =>
         runTowerTool(async () => {
-          const store = newTowerStore(this.sessionContext);
+          const store = newTowerStore(this.tower);
           const priorOwner = await store.load().then(
             (state) => state.sessionId,
             () => undefined,

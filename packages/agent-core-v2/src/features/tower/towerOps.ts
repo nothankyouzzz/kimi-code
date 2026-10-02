@@ -9,6 +9,7 @@ const towerModeEnterSchema = z.object({
   agentId: z.string(),
   sessionId: z.string().optional(),
   base: z.string().optional(),
+  dir: z.string().optional(),
 });
 
 export class TowerModeEnter extends AgentEvent2<z.infer<typeof towerModeEnterSchema>> {
@@ -20,6 +21,7 @@ export interface TowerModeEnter {
   readonly agentId: string;
   readonly sessionId?: string;
   readonly base?: string;
+  readonly dir?: string;
 }
 
 const towerModeExitSchema = z.object({ agentId: z.string() });
@@ -69,4 +71,11 @@ export const towerBaseKey = defineState('tower.base', (): string | null => null)
     schema: z.custom<string | null>(),
   })
   .on(TowerModeEnter, (_s, e) => e.base ?? null)
+  .on(TowerModeExit, () => null);
+
+export const towerDirKey = defineState('tower.dir', (): string | null => null)
+  .replayable({
+    schema: z.custom<string | null>(),
+  })
+  .on(TowerModeEnter, (_s, e) => e.dir ?? null)
   .on(TowerModeExit, () => null);

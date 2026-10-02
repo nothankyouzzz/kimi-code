@@ -1,3 +1,5 @@
+import { stat } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { isAbsolute, normalize, resolve } from 'pathe';
 
@@ -50,6 +52,7 @@ import {
   branchExists,
   checkoutNewLocalBranch,
   commitPaths,
+  isInsideRepo,
   listBaseDirtyEntries,
   resolveTowerRepoRoot,
   TowerProtocolError,
@@ -64,7 +67,7 @@ import {
   type TowerExitReason,
 } from './tower';
 import { isTowerFeatureAssembled } from './towerFeature';
-import { TowerInboxSent, TowerModeEnter, TowerModeExit, towerBaseKey, towerKey, towerOwnerKey } from './towerOps';
+import { TowerInboxSent, TowerModeEnter, TowerModeExit, towerBaseKey, towerDirKey, towerKey, towerOwnerKey } from './towerOps';
 import { evaluateWorkerBashCommand } from './workerShellGuard';
 
 export const TOWER_MODE_TOOLS: readonly string[] = ['TowerInit', ...TOWER_TOOL_NAMES];
@@ -113,6 +116,7 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
     this.agentState.contributeState(towerKey);
     this.agentState.contributeState(towerOwnerKey);
     this.agentState.contributeState(towerBaseKey);
+    this.agentState.contributeState(towerDirKey);
     this._register(
       this.dispatcher.hooks.onDidRestore.register('tower', async (_ctx, next) => {
         await this.reconcileForeignTower();
@@ -284,7 +288,7 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
           this.toolPolicy.isToolActive('TaskOutput') &&
           this.toolPolicy.isToolActive('TaskStop');
         if (!backgroundAvailable) return;
-        const store = new TowerStore(resolveTowerRepoRoot(this.sessionCtx.cwd));
+        const store = new TowerStore(this.workspaceRoot);
         const entry = await store
           .load()
           .then(
@@ -306,7 +310,7 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
         const toolName = event.toolCall.name;
         if (toolName !== 'Write' && toolName !== 'Edit' && toolName !== 'Bash') return;
 
-        const store = new TowerStore(resolveTowerRepoRoot(this.sessionCtx.cwd));
+        const store = new TowerStore(this.workspaceRoot);
         const state = await store.load().catch(() => undefined);
         if (state === undefined) return;
 
@@ -390,8 +394,8 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
     );
   }
 
-  async enter(base?: string): Promise<TowerEnterResult> {
-    const result = await this.resolveEnter(base);
+  async enter(base?: string, dir?: string): Promise<TowerEnterResult> {
+    const result = await this.resolveEnter(base, dir);
     this.telemetry.track2('tower_mode_enter', {
       outcome: result.entered ? 'entered' : 'rejected',
       reason: result.entered ? undefined : result.reason,
@@ -399,20 +403,24 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
     return result;
   }
 
-  private async resolveEnter(base?: string): Promise<TowerEnterResult> {
+  private async resolveEnter(base?: string, dir?: string): Promise<TowerEnterResult> {
     if (this.agentCtx.agentId !== 'main') return { entered: false, reason: 'not-main-agent' };
     if (!this.flags.enabled(TOWER_FLAG_ID)) return { entered: false, reason: 'experiment-off' };
     if (!isTowerFeatureAssembled(this.flags)) return { entered: false, reason: 'feature-not-assembled' };
+    const resolvedDir = dir !== undefined ? await this.validateUserDir(dir) : undefined;
+    const root = resolvedDir ?? this.workspaceRoot;
     if (base !== undefined) {
-      await this.prepareUserBase(base);
+      await this.prepareUserBase(root, base);
     }
     if (this.isActive) {
-      if (base !== undefined && base !== this.agentState.get(towerBaseKey)) {
-        this.dispatchEnter(base);
+      const baseChanged = base !== undefined && base !== this.agentState.get(towerBaseKey);
+      const dirChanged = resolvedDir !== undefined && resolvedDir !== this.agentState.get(towerDirKey);
+      if (baseChanged || dirChanged) {
+        this.dispatchEnter(base, resolvedDir);
       }
       return { entered: true };
     }
-    const owner = await this.resolveTowerOwner();
+    const owner = await this.resolveTowerOwner(root);
     if (owner !== undefined && owner !== this.sessionCtx.sessionId) {
       const ownerHandle = this.sessions.get(owner);
       if (ownerHandle !== undefined) {
@@ -428,10 +436,10 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
           .exit('takeover');
       }
     }
-    await this.adoptTowerRoster();
+    await this.adoptTowerRoster(root);
     for (const name of TOWER_MODE_TOOLS) this.profile.addActiveTool(name);
     this.lastPublished = true;
-    this.dispatchEnter(base);
+    this.dispatchEnter(base, resolvedDir);
     return { entered: true };
   }
 
@@ -439,8 +447,52 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
     return this.agentState.get(towerBaseKey) ?? undefined;
   }
 
-  private async prepareUserBase(base: string): Promise<void> {
-    const repoRoot = resolveTowerRepoRoot(this.sessionCtx.cwd);
+  get requestedDir(): string | undefined {
+    return this.agentState.get(towerDirKey) ?? undefined;
+  }
+
+  get workspaceRoot(): string {
+    return this.requestedDir ?? resolveTowerRepoRoot(this.sessionCtx.cwd);
+  }
+
+  private async validateUserDir(dir: string): Promise<string> {
+    const trimmed = dir.trim();
+    let expanded = trimmed;
+    if (trimmed === '~') {
+      expanded = homedir();
+    } else if (trimmed.startsWith('~/') || trimmed.startsWith('~\\')) {
+      expanded = resolve(homedir(), trimmed.slice(2));
+    }
+    const absolutePath = isAbsolute(expanded) ? expanded : resolve(this.sessionCtx.cwd, expanded);
+    const root = resolveTowerRepoRoot(resolve(absolutePath));
+    const stats = await stat(root).catch((error: unknown) => {
+      throw new TowerProtocolError(
+        `tower directory "${dir}" (${root}) does not exist: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+    if (!stats.isDirectory()) {
+      throw new TowerProtocolError(`tower directory "${dir}" (${root}) is not a directory`);
+    }
+    if (!(await isInsideRepo(root))) {
+      throw new TowerProtocolError(
+        `tower directory "${dir}" (${root}) is not inside a git work tree; tower will not run "git init" on an explicitly chosen directory`,
+      );
+    }
+    return root;
+  }
+
+  async setWorkspaceDir(dir: string): Promise<string> {
+    if (!this.isActive) {
+      throw new TowerProtocolError(
+        'tower mode is not active — its directory can only be set while the tower runs',
+      );
+    }
+    const root = await this.validateUserDir(dir);
+    this.dispatchEnter(this.requestedBase, root);
+    return root;
+  }
+
+  private async prepareUserBase(repoRoot: string, base: string): Promise<void> {
     const store = new TowerStore(repoRoot);
     await store.ensureRepository(base);
     if (await store.isInitialized()) {
@@ -494,12 +546,13 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
     }
   }
 
-  private dispatchEnter(base: string | undefined): void {
+  private dispatchEnter(base?: string, dir?: string): void {
     void this.dispatcher.dispatch(
       new TowerModeEnter({
         agentId: this.agentCtx.agentId,
         sessionId: this.sessionCtx.sessionId,
-        base,
+        base: base ?? this.requestedBase ?? undefined,
+        dir: dir ?? this.requestedDir ?? undefined,
       }),
     );
   }
@@ -520,8 +573,8 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
     this.inboxWakeSignals = 0;
   }
 
-  private async adoptTowerRoster(): Promise<void> {
-    const store = new TowerStore(resolveTowerRepoRoot(this.sessionCtx.cwd));
+  private async adoptTowerRoster(root: string = this.workspaceRoot): Promise<void> {
+    const store = new TowerStore(root);
     try {
       await store.adopt(this.sessionCtx.sessionId);
     } catch (error) {
@@ -532,7 +585,7 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
   }
 
   private async releaseTowerOwnership(): Promise<void> {
-    const store = new TowerStore(resolveTowerRepoRoot(this.sessionCtx.cwd));
+    const store = new TowerStore(this.workspaceRoot);
     await store.release(this.sessionCtx.sessionId).then(
       () => undefined,
       (error: unknown) => {
@@ -571,8 +624,8 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
     void this.exit('foreign-reconcile');
   }
 
-  private async resolveTowerOwner(): Promise<string | undefined> {
-    const store = new TowerStore(resolveTowerRepoRoot(this.sessionCtx.cwd));
+  private async resolveTowerOwner(root: string = this.workspaceRoot): Promise<string | undefined> {
+    const store = new TowerStore(root);
     const storeOwner = await store.load().then(
       (state) => state.sessionId,
       () => undefined,
@@ -594,7 +647,7 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
     if (info.agentId === undefined) return;
     if (info.status === 'completed') return;
     if (!this.isActive) return;
-    const store = new TowerStore(resolveTowerRepoRoot(this.sessionCtx.cwd));
+    const store = new TowerStore(this.workspaceRoot);
     const foreignOwner = await this.resolveForeignStoreOwner(store);
     if (foreignOwner !== undefined) {
       this.log.info('tower: skipping roster agent death mark — tower store is owned by another session', {
@@ -623,7 +676,7 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
 
   private async clearTowerAgentDeath(agentId: string): Promise<void> {
     if (!this.isActive) return;
-    const store = new TowerStore(resolveTowerRepoRoot(this.sessionCtx.cwd));
+    const store = new TowerStore(this.workspaceRoot);
     const foreignOwner = await this.resolveForeignStoreOwner(store);
     if (foreignOwner !== undefined) {
       this.log.info('tower: skipping roster agent death clear — tower store is owned by another session', {

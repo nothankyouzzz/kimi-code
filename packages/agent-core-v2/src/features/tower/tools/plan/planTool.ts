@@ -1,7 +1,6 @@
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
 import { IAgentTowerService } from '#/features/tower/tower';
-import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { toInputJsonSchema } from '#/tool/input-schema';
 import type { ToolExecution } from '#/tool/toolContract';
 
@@ -21,7 +20,6 @@ export class TowerPlanTool implements ITowerPlanTool {
   readonly parameters: Record<string, unknown> = toInputJsonSchema(TowerPlanToolInputSchema);
 
   constructor(
-    @ISessionContext private readonly sessionContext: ISessionContext,
     @IAgentTowerService private readonly tower: IAgentTowerService,
     @IAgentScopeContext private readonly scopeContext: IAgentScopeContext,
   ) {}
@@ -44,7 +42,7 @@ export class TowerPlanTool implements ITowerPlanTool {
               isError: true,
             };
           }
-          const store = newTowerStore(this.sessionContext);
+          const store = newTowerStore(this.tower);
           const missions = await store.plan(args.missions);
           const rows = missions.map(
             (m) =>

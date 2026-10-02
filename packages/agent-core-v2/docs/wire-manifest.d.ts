@@ -80,8 +80,8 @@
 //   tools.set_active_tools             profile.activeTools                                   src/agent/profile/profileOps.ts
 //   tools.unregister_user_tool         userTool                                              src/agent/userTool/userToolOps.ts
 //   tools.update_store                 (none)                                                src/features/todo/todoOps.ts
-//   tower_mode.enter                   tower, tower.base, tower.owner                        src/features/tower/towerOps.ts
-//   tower_mode.exit                    tower, tower.base, tower.owner                        src/features/tower/towerOps.ts
+//   tower_mode.enter                   tower, tower.base, tower.dir, tower.owner             src/features/tower/towerOps.ts
+//   tower_mode.exit                    tower, tower.base, tower.dir, tower.owner             src/features/tower/towerOps.ts
 //   turn.cancel                        turn                                                  src/agent/loop/turnOps.ts
 //   turn.ended                         turn                                                  src/agent/loop/turnOps.ts
 //   turn.prompt                        turn                                                  src/agent/loop/turnOps.ts
@@ -794,7 +794,7 @@ interface ToolsUpdateStorePayload {
 }
 
 /**
- * states: tower, tower.base, tower.owner
+ * states: tower, tower.base, tower.dir, tower.owner
  * owner: src/features/tower/towerOps.ts
  */
 interface TowerModeEnterPayload {
@@ -802,10 +802,11 @@ interface TowerModeEnterPayload {
   agentId: string;
   sessionId?: string;
   base?: string;
+  dir?: string;
 }
 
 /**
- * states: tower, tower.base, tower.owner
+ * states: tower, tower.base, tower.dir, tower.owner
  * owner: src/features/tower/towerOps.ts
  */
 interface TowerModeExitPayload {

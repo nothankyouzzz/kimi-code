@@ -128,6 +128,7 @@ beforeEach(async () => {
         },
         scope: (subKey?: string) => subKey ?? '',
       });
+      let towerRequestedDir: string | undefined;
       reg.defineInstance(IAgentTowerService, {
         _serviceBrand: undefined,
         get isActive() {
@@ -136,13 +137,25 @@ beforeEach(async () => {
         get requestedBase() {
           return towerRequestedBase;
         },
-        enter: () => {
+        get requestedDir() {
+          return towerRequestedDir;
+        },
+        get workspaceRoot() {
+          return towerRequestedDir ?? repo;
+        },
+        enter: (base?: string, dir?: string) => {
           towerActive = true;
+          towerRequestedBase = base;
+          towerRequestedDir = dir;
           return Promise.resolve({ entered: true as const });
         },
         exit: () => {
           towerActive = false;
           return Promise.resolve();
+        },
+        setWorkspaceDir: (dir: string) => {
+          towerRequestedDir = dir;
+          return Promise.resolve(dir);
         },
       });
       reg.defineInstance(ISessionManager, {
@@ -224,6 +237,26 @@ describe('TowerInitTool', () => {
     expect(result.output).toContain('the main checkout is on "main", not base "develop"');
     const state = await new TowerStore(repo).load();
     expect(state.base).toBe('develop');
+  });
+
+  it('accepts an explicit dir, repointing the workspace there', async () => {
+    const otherRepo = await mkdtemp(join(tmpdir(), 'tower-other-repo-'));
+    try {
+      await git(otherRepo, 'init', '-b', 'main');
+      await git(otherRepo, 'config', 'user.email', 'tower-test@example.com');
+      await git(otherRepo, 'config', 'user.name', 'Tower Test');
+      await commitFile(otherRepo, 'README.md', '# other\n', 'initial');
+      towerActive = true;
+
+      const result = await run(ix.get(ITowerInitTool), { dir: otherRepo });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.output).toContain('tower workspace initialized');
+      expect((await stat(join(otherRepo, '.tower/comms'))).isDirectory()).toBe(true);
+      expect((await stat(join(repo, '.tower')).catch(() => undefined))).toBeUndefined();
+    } finally {
+      await rm(otherRepo, { recursive: true, force: true });
+    }
   });
 
   it('falls back to the base requested when tower mode was enabled', async () => {

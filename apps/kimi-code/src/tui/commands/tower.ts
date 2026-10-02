@@ -8,8 +8,9 @@ export async function handleTowerCommand(host: SlashCommandHost, args: string): 
   const input = args.trim();
   const sub = input.toLowerCase();
 
-  if (sub === 'on') {
-    await applyTowerMode(host, true);
+  if (sub === 'on' || sub.startsWith('on ') || sub.startsWith('on\t')) {
+    const rest = input.slice(2).trim();
+    await applyTowerMode(host, true, rest.length > 0 ? rest : undefined);
     return;
   }
   if (sub === 'off') {
@@ -37,27 +38,40 @@ async function startTowerWithBase(host: SlashCommandHost, base: string): Promise
   host.showNotice(wasActive ? `Tower base: ${base}` : `Tower mode: ON (base: ${base})`);
 }
 
-async function applyTowerMode(host: SlashCommandHost, enabled: boolean): Promise<void> {
+async function applyTowerMode(
+  host: SlashCommandHost,
+  enabled: boolean,
+  dir?: string,
+): Promise<void> {
   const wasActive = host.state.appState.towerMode;
   // The setter is idempotent engine-side, so always reassert — a stale cache
   // must not leave the authoritative mode unchanged.
-  if (!(await setTowerMode(host, enabled))) return;
-  if (wasActive === enabled) {
+  if (!(await setTowerMode(host, enabled, undefined, dir))) return;
+  if (wasActive === enabled && dir === undefined) {
     host.showStatus(`Tower mode is already ${enabled ? 'on' : 'off'}.`);
     return;
   }
-  host.showNotice(enabled ? 'Tower mode: ON' : 'Tower mode: OFF');
+  if (!enabled) {
+    host.showNotice('Tower mode: OFF');
+    return;
+  }
+  host.showNotice(dir !== undefined ? `Tower mode: ON (dir: ${dir})` : 'Tower mode: ON');
 }
 
 async function setTowerMode(
   host: SlashCommandHost,
   enabled: boolean,
   base?: string,
+  dir?: string,
 ): Promise<boolean> {
   const session = await requireSessionEnsured(host);
   if (session === undefined) return false;
   try {
-    await session.setTowerMode(enabled, base);
+    if (dir !== undefined) {
+      await session.setTowerMode(enabled, base, dir);
+    } else {
+      await session.setTowerMode(enabled, base);
+    }
     // The engine may silently refuse entry (flag off, feature not assembled
     // until a restart, another session owning the workspace tower) — confirm
     // the mode actually took before reporting success.

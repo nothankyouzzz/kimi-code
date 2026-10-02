@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { MISSIONS_DIR, missionFileName } from '#/features/tower/protocol/index';
 import type { TowerMission, TowerStore } from '#/features/tower/protocol/index';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
-import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { IAgentTowerService } from '#/features/tower/tower';
 import { toInputJsonSchema } from '#/tool/input-schema';
 import type { ToolExecution } from '#/tool/toolContract';
 
@@ -23,7 +23,7 @@ export class TowerMissionTool implements ITowerMissionTool {
   readonly parameters: Record<string, unknown> = toInputJsonSchema(TowerMissionToolInputSchema);
 
   constructor(
-    @ISessionContext private readonly sessionContext: ISessionContext,
+    @IAgentTowerService private readonly tower: IAgentTowerService,
     @IAgentScopeContext private readonly scopeContext: IAgentScopeContext,
   ) {}
 
@@ -43,7 +43,7 @@ export class TowerMissionTool implements ITowerMissionTool {
       approvalRule: this.name,
       execute: () =>
         runTowerTool(async () => {
-          const store = newTowerStore(this.sessionContext);
+          const store = newTowerStore(this.tower);
           const state = await store.load();
           const caller = callerName(this.scopeContext.agentId, store, state);
           if (!hasPatch) {

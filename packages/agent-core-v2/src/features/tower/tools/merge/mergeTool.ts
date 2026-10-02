@@ -1,6 +1,6 @@
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { IAgentTowerService } from '#/features/tower/tower';
 import { MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
-import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { toInputJsonSchema } from '#/tool/input-schema';
 import type { ToolExecution } from '#/tool/toolContract';
 
@@ -15,7 +15,7 @@ export class TowerMergeTool implements ITowerMergeTool {
   readonly parameters: Record<string, unknown> = toInputJsonSchema(TowerMergeToolInputSchema);
 
   constructor(
-    @ISessionContext private readonly sessionContext: ISessionContext,
+    @IAgentTowerService private readonly tower: IAgentTowerService,
     @IAgentScopeContext private readonly scopeContext: IAgentScopeContext,
   ) {}
 
@@ -31,7 +31,7 @@ export class TowerMergeTool implements ITowerMergeTool {
       approvalRule: this.name,
       execute: () =>
         runTowerTool(async () => {
-          const store = newTowerStore(this.sessionContext);
+          const store = newTowerStore(this.tower);
           const { mergeCommit, conflictsWith, noop } = await store.merge(args.branch);
           const after = await store.load();
           const allClosed =

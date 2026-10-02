@@ -8,9 +8,11 @@
  * Wiring: real v2 engine bootstrapped on a temp KIMI_CODE_HOME; remote provider calls are stubbed.
  * Run: pnpm exec vitest run test/sdk-rpc-client-v2.test.ts
  */
+import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 
 import {
   FileTokenStorage,
@@ -87,6 +89,7 @@ vi.mock('@moonshot-ai/agent-core-v2/_base/execEnv/environmentProbe', async (impo
 });
 
 const tempDirs: string[] = [];
+const execFileAsync = promisify(execFile);
 
 afterEach(async () => {
   resetModelsDevUpstreamForTest();
@@ -1415,6 +1418,23 @@ key = "${titleOAuthRef.key}"
       expect((await client.getStatus({ sessionId: 'ses_tower' })).towerMode).toBe(
         mainTower().isActive,
       );
+
+      await client.setTowerMode({ sessionId: 'ses_tower', enabled: false });
+      expect((await client.getStatus({ sessionId: 'ses_tower' })).towerMode).toBe(false);
+
+      const customRepo = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-custom-repo-'));
+      tempDirs.push(customRepo);
+      await execFileAsync('git', ['init', '-b', 'main'], { cwd: customRepo });
+      await execFileAsync('git', ['config', 'user.email', 'test@example.com'], { cwd: customRepo });
+      await execFileAsync('git', ['config', 'user.name', 'Test'], { cwd: customRepo });
+      await writeFile(join(customRepo, 'README.md'), '# custom\n');
+      await execFileAsync('git', ['add', 'README.md'], { cwd: customRepo });
+      await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: customRepo });
+
+      await client.setTowerMode({ sessionId: 'ses_tower', enabled: true, dir: customRepo });
+      expect(mainTower().isActive).toBe(true);
+      expect(mainTower().requestedDir).toBe(customRepo);
+      expect(mainTower().workspaceRoot).toBe(customRepo);
 
       await client.setTowerMode({ sessionId: 'ses_tower', enabled: false });
       expect((await client.getStatus({ sessionId: 'ses_tower' })).towerMode).toBe(false);

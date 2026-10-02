@@ -338,7 +338,7 @@ export class Session {
     }
   }
 
-  async setTowerMode(enabled: boolean, base?: string): Promise<void> {
+  async setTowerMode(enabled: boolean, base?: string, dir?: string): Promise<void> {
     this.ensureOpen();
     if (typeof enabled !== 'boolean') {
       throw new KimiError(
@@ -352,7 +352,13 @@ export class Session {
         'Session tower mode base must be a string',
       );
     }
-    await this.rpc.setTowerMode({ sessionId: this.id, enabled, base });
+    if (dir !== undefined && typeof dir !== 'string') {
+      throw new KimiError(
+        ErrorCodes.REQUEST_INVALID,
+        'Session tower mode dir must be a string',
+      );
+    }
+    await this.rpc.setTowerMode({ sessionId: this.id, enabled, base, dir });
   }
 
   async getPlan(): Promise<SessionPlan> {

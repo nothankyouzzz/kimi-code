@@ -194,7 +194,7 @@ export const BUILTIN_SLASH_COMMANDS = [
     aliases: [],
     description: 'Report tower status, toggle tower mode, or turn it on with a base branch',
     priority: 100,
-    argumentHint: '[status|teardown|on|off] | <base-branch>',
+    argumentHint: '[status|teardown|on [dir]|off] | <base-branch>',
     completeArgs: towerArgumentCompletions,
     // Every form stays available while busy: base selections apply to the next
     // TowerInit of the running coordinator turn, so /tower commands never wait
