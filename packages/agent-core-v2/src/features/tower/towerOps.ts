@@ -80,4 +80,23 @@ export const towerDirKey = defineState('tower.dir', (): string | null => null)
   .on(TowerModeEnter, (_s, e) => e.dir ?? null)
   .on(TowerModeExit, () => null);
 
-export const towerWorkspaceKey = defineState('tower.workspace', () => undefined as string | undefined);
+const towerWorkspaceAdoptedSchema = z.object({
+  agentId: z.string(),
+  root: z.string(),
+});
+
+export class TowerWorkspaceAdopted extends AgentEvent2<z.infer<typeof towerWorkspaceAdoptedSchema>> {
+  static override readonly type = 'tower.workspace.adopted';
+  static override readonly durable = true;
+  static override readonly schema = towerWorkspaceAdoptedSchema;
+}
+export interface TowerWorkspaceAdopted {
+  readonly agentId: string;
+  readonly root: string;
+}
+
+export const towerWorkspaceKey = defineState('tower.workspace', (): string | null => null)
+  .replayable({
+    schema: z.custom<string | null>(),
+  })
+  .on(TowerWorkspaceAdopted, (_s, e) => e.root);

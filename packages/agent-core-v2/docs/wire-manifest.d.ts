@@ -24,7 +24,7 @@
 // cross-reducers), blobs (the folding states whose blob codec offloads inline
 // media to blob storage), owner (the source file declaring the class).
 
-// Index (64 record types)
+// Index (65 record types)
 //   config.update                      profile                                               src/agent/profile/profileOps.ts
 //   context.append_loop_event          contextMemory, turn                                   src/agent/contextMemory/contextEvents.ts
 //   context.append_message             contextMemory, plan, task.notificationDelivery        src/agent/contextMemory/contextEvents.ts
@@ -82,6 +82,7 @@
 //   tools.update_store                 (none)                                                src/features/todo/todoOps.ts
 //   tower_mode.enter                   tower, tower.base, tower.dir, tower.owner             src/features/tower/towerOps.ts
 //   tower_mode.exit                    tower, tower.base, tower.dir, tower.owner             src/features/tower/towerOps.ts
+//   tower.workspace.adopted            tower.workspace                                       src/features/tower/towerOps.ts
 //   turn.cancel                        turn                                                  src/agent/loop/turnOps.ts
 //   turn.ended                         turn                                                  src/agent/loop/turnOps.ts
 //   turn.prompt                        turn                                                  src/agent/loop/turnOps.ts
@@ -815,6 +816,16 @@ interface TowerModeExitPayload {
 }
 
 /**
+ * states: tower.workspace
+ * owner: src/features/tower/towerOps.ts
+ */
+interface TowerWorkspaceAdoptedPayload {
+  _name: 'tower.workspace.adopted';
+  agentId: string;
+  root: string;
+}
+
+/**
  * states: turn
  * owner: src/agent/loop/turnOps.ts
  */
@@ -1018,6 +1029,7 @@ interface WirePayloadMap {
   "tools.update_store": ToolsUpdateStorePayload;
   "tower_mode.enter": TowerModeEnterPayload;
   "tower_mode.exit": TowerModeExitPayload;
+  "tower.workspace.adopted": TowerWorkspaceAdoptedPayload;
   "turn.cancel": TurnCancelPayload;
   "turn.ended": TurnEndedPayload;
   "turn.prompt": TurnPromptPayload;

@@ -49,7 +49,7 @@ import {
   TOWER_MODE_TOOLS,
   TOWER_ORCHESTRATION_TOOLS,
 } from '#/features/tower/towerService';
-import { towerKey, TowerInboxSent } from '#/features/tower/towerOps';
+import { towerKey, TowerInboxSent, towerWorkspaceKey } from '#/features/tower/towerOps';
 import { TaskTerminatedNotice } from '#/agent/task/taskOps';
 import { IAgentTaskService } from '#/agent/task/task';
 import { SubagentStarted } from '#/session/subagent/mirrorAgentRun';
@@ -429,6 +429,45 @@ describe('AgentTowerService', () => {
     tower.adoptWorkspaceRoot('/towers/owner-repo');
 
     expect(tower.workspaceRoot).toBe('/towers/owner-repo');
+  });
+
+  it('persists an adopted tower workspace root and replays it into a fresh state registry', async () => {
+    const tower = ix.get(IAgentTowerService);
+    tower.adoptWorkspaceRoot('/towers/owner-repo');
+
+    const log = ix.get(IAppendLogStore);
+    const records: WireRecord[] = [];
+    for await (const record of log.read<WireRecord>(
+      testWireScope('wire', 'tower-test'),
+      AGENT_WIRE_RECORD_KEY,
+    )) {
+      records.push(record);
+    }
+    expect(records).toEqual([
+      {
+        type: 'tower.workspace.adopted',
+        agentId: 'main',
+        root: '/towers/owner-repo',
+        time: expect.any(Number),
+      },
+    ]);
+
+    const ix2 = disposables.add(new TestInstantiationService());
+    ix2.stub(IFileSystemStorageService, new InMemoryStorageService());
+    ix2.set(IAppendLogStore, new SyncDescriptor(AppendLogStore));
+    registerTestAgentWire(ix2, testWireScope('wire', 'tower-workspace-replay'), {
+      log: ix2.get(IAppendLogStore),
+    });
+    stubMainAgentScope(ix2);
+    const dispatcher = registerTestEventDispatcher(ix2);
+    ix2.get(IAgentStateService).contributeState(towerWorkspaceKey);
+    await restoreTestEventDispatcher(
+      dispatcher,
+      ix2.get(IAppendLogStore),
+      testWireScope('wire', 'tower-workspace-replay'),
+      records,
+    );
+    expect(ix2.get(IAgentStateService).get(towerWorkspaceKey)).toBe('/towers/owner-repo');
   });
 
   it('re-entering with a new base keeps a previously requested custom dir', async () => {

@@ -67,7 +67,7 @@ import {
   type TowerExitReason,
 } from './tower';
 import { isTowerFeatureAssembled } from './towerFeature';
-import { TowerInboxSent, TowerModeEnter, TowerModeExit, towerBaseKey, towerDirKey, towerKey, towerOwnerKey, towerWorkspaceKey } from './towerOps';
+import { TowerInboxSent, TowerModeEnter, TowerModeExit, TowerWorkspaceAdopted, towerBaseKey, towerDirKey, towerKey, towerOwnerKey, towerWorkspaceKey } from './towerOps';
 import { evaluateWorkerBashCommand } from './workerShellGuard';
 
 export const TOWER_MODE_TOOLS: readonly string[] = ['TowerInit', ...TOWER_TOOL_NAMES];
@@ -457,7 +457,7 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
   }
 
   adoptWorkspaceRoot(root: string): void {
-    this.agentState.set(towerWorkspaceKey, root);
+    void this.dispatcher.dispatch(new TowerWorkspaceAdopted({ agentId: this.agentCtx.agentId, root }));
   }
 
   private async validateUserDir(dir: string): Promise<string> {

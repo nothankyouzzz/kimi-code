@@ -1314,7 +1314,8 @@ export interface AgentStateSnapshot {
   'tower.dir': string | null;
   // replayable · durable — folds: TowerModeEnter, TowerModeExit
   'tower.owner': string | undefined;
-  'tower.workspace': string | undefined;
+  // replayable · durable — folds: TowerWorkspaceAdopted
+  'tower.workspace': string | null;
 }
 
 export type AgentStateKey = keyof AgentStateSnapshot;
