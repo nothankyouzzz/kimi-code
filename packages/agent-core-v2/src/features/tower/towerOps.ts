@@ -79,3 +79,5 @@ export const towerDirKey = defineState('tower.dir', (): string | null => null)
   })
   .on(TowerModeEnter, (_s, e) => e.dir ?? null)
   .on(TowerModeExit, () => null);
+
+export const towerWorkspaceKey = defineState('tower.workspace', () => undefined as string | undefined);

@@ -86,6 +86,7 @@ describe('TowerSpawnTool', () => {
   let thinkingEnabled: boolean | undefined;
   let modelMeta: Record<string, Partial<Model>>;
   let createdSetMode: Mock<(mode: PermissionMode) => void>;
+  let createdAdoptWorkspaceRoot: Mock<(root: string) => void>;
   let createdThinkingEffort: string;
 
   async function git(cwd: string, ...args: string[]): Promise<void> {
@@ -115,6 +116,7 @@ describe('TowerSpawnTool', () => {
     thinkingEnabled = undefined;
     modelMeta = {};
     createdSetMode = vi.fn();
+    createdAdoptWorkspaceRoot = vi.fn();
     createdThinkingEffort = 'off';
     createAgent = vi.fn(async () => stubAgentContext('agent-7', 1));
     runAgent = vi.fn(
@@ -158,6 +160,9 @@ describe('TowerSpawnTool', () => {
         get: (id: unknown) => {
           if (id === (IAgentPermissionModeService as unknown)) {
             return { setMode: createdSetMode };
+          }
+          if (id === (IAgentTowerService as unknown)) {
+            return { adoptWorkspaceRoot: createdAdoptWorkspaceRoot };
           }
           if (id === (IAgentProfileService as unknown)) {
             return { getEffectiveThinkingLevel: () => createdThinkingEffort };
@@ -416,6 +421,23 @@ describe('TowerSpawnTool', () => {
 
     expect(result.isError).toBeUndefined();
     expect(createdSetMode).toHaveBeenCalledWith('auto');
+  });
+
+  it('seeds the spawned worker and reviewer with the tower workspace root', async () => {
+    const worker = await execute(WORKER_ARGS);
+
+    expect(worker.isError).toBeUndefined();
+    expect(createdAdoptWorkspaceRoot).toHaveBeenCalledWith(repo);
+
+    createdAdoptWorkspaceRoot.mockClear();
+    const reviewer = await execute({
+      name: 'reviewer-a',
+      kind: 'reviewer',
+      review_target: 'feat/build-gemm',
+    });
+
+    expect(reviewer.isError).toBeUndefined();
+    expect(createdAdoptWorkspaceRoot).toHaveBeenCalledWith(repo);
   });
 
   it('carries the bound model and the spawned agent thinking effort into the registered task info', async () => {

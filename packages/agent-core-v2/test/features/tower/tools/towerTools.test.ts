@@ -157,6 +157,7 @@ beforeEach(async () => {
           towerRequestedDir = dir;
           return Promise.resolve(dir);
         },
+        adoptWorkspaceRoot: () => {},
       });
       reg.defineInstance(ISessionManager, {
         get: (id: string) => (liveSessionIds.includes(id) ? {} : undefined),

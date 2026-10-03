@@ -433,6 +433,7 @@ export class TowerSpawnTool implements ITowerSpawnTool {
     }
     const created = this.agentLifecycle.handleOf(createdContext.agentId)!;
     created.accessor.get(IAgentPermissionModeService).setMode('auto');
+    created.accessor.get(IAgentTowerService).adoptWorkspaceRoot(this.tower.workspaceRoot);
     const agentId = createdContext.agentId;
 
     emitAgentRunSpawned(requester, agentId, {
@@ -491,7 +492,7 @@ export class TowerSpawnTool implements ITowerSpawnTool {
         (mission.spawnBase !== undefined
           ? `- Your branch starts from snapshot commit ${mission.spawnBase.slice(0, 7)}: the base checkout's uncommitted changes (WIP), captured at spawn so you can build on them. That commit is your foundation — never revert, amend, or claim it as your own work; your own commits go on top of it.\n`
           : '') +
-        `- Your working directory is the main checkout, NOT your worktree — address the worktree explicitly: every Read/Write/Edit/Grep/Glob path must be absolute and under ${worktreeAbs}, and every Bash command must \`cd ${worktreeAbs}\` first. A permission guard hard-denies any Write/Edit outside it; reads are unrestricted — you may read the main checkout (${store.repoRoot}) or another agent's worktree when coordination calls for it, but write only inside your own.\n` +
+        `- Your process working directory is the session's directory and may lie outside this repository — address your worktree explicitly anyway: every Read/Write/Edit/Grep/Glob path must be absolute and under ${worktreeAbs}, and every Bash command must \`cd ${worktreeAbs}\` first. A permission guard hard-denies any Write/Edit outside it; reads are unrestricted — you may read the main checkout (${store.repoRoot}) or another agent's worktree when coordination calls for it, but write only inside your own.\n` +
         (mission.kind === 'survey'
           ? `- Scope — what you investigate (read-only; reserves nothing): ${mission.scope.join(', ')}\n\n`
           : `- Scope — the only files you may change: ${mission.scope.join(', ')}\n\n`);

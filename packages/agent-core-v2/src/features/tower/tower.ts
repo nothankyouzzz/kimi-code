@@ -65,6 +65,7 @@ export interface IAgentTowerService {
   enter(base?: string, dir?: string): Promise<TowerEnterResult>;
   exit(reason?: TowerExitReason): Promise<void>;
   setWorkspaceDir(dir: string): Promise<string>;
+  adoptWorkspaceRoot(root: string): void;
 }
 
 export const IAgentTowerService = createDecorator<IAgentTowerService>('agentTowerService');

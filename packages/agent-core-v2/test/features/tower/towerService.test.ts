@@ -417,6 +417,20 @@ describe('AgentTowerService', () => {
     }
   });
 
+  it('prefers an adopted tower workspace root over the session cwd fallback', async () => {
+    ix.stub(ISessionContext, {
+      cwd: '/sessions/somewhere/.tower/worktrees/wt-1',
+      sessionId: 'session-adopt',
+    } as unknown as ISessionContext);
+    const tower = ix.get(IAgentTowerService);
+
+    expect(tower.workspaceRoot).toBe('/sessions/somewhere');
+
+    tower.adoptWorkspaceRoot('/towers/owner-repo');
+
+    expect(tower.workspaceRoot).toBe('/towers/owner-repo');
+  });
+
   it('re-entering with a new base keeps a previously requested custom dir', async () => {
     const sessionRepo = await mkdtemp(join(tmpdir(), 'tower-session-repo-'));
     const targetRepo = await mkdtemp(join(tmpdir(), 'tower-target-repo-'));
