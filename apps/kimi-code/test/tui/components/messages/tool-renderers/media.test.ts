@@ -311,4 +311,37 @@ describe('readMediaSummary renderer', () => {
     );
     expect(components.some((c) => c instanceof Image)).toBe(false);
   });
+
+  it('re-resolves a blobref once the blob is flushed — a miss is not permanent', () => {
+    setCapabilities({ images: 'iterm2', trueColor: true, hyperlinks: false });
+    const sessionDir = mkdtempSync(join(tmpdir(), 'media-blob-'));
+    setMediaBlobSessionDir(sessionDir);
+
+    const components = readMediaSummary(
+      call('ReadMediaFile'),
+      result(blobrefImageOutput('/tmp/a.png')),
+      expandedCtx,
+    );
+
+    writeBlob(sessionDir, BLOB_HASH, Buffer.from(PNG_B64, 'base64'));
+
+    expect(joinRender(components)).toContain(PNG_B64);
+  });
+
+  it('updates an already-built body once the session dir is injected late', () => {
+    setCapabilities({ images: 'iterm2', trueColor: true, hyperlinks: false });
+    const sessionDir = mkdtempSync(join(tmpdir(), 'media-blob-'));
+    writeBlob(sessionDir, BLOB_HASH, Buffer.from(PNG_B64, 'base64'));
+
+    const components = readMediaSummary(
+      call('ReadMediaFile'),
+      result(blobrefImageOutput('/tmp/a.png')),
+      ctx,
+    );
+    expect(joinRender(components)).not.toContain(PNG_B64);
+
+    setMediaBlobSessionDir(sessionDir);
+
+    expect(joinRender(components)).toContain(PNG_B64);
+  });
 });

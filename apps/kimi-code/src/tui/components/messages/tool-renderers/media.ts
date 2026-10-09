@@ -152,11 +152,12 @@ const MAX_IMAGE_WIDTH = 40;
 
 // Replayed records carry `blobref:` URLs instead of inline base64 (see the
 // header comment). The blob files live under the session directory, which the
-// TUI knows only after a session is bound, so KimiTUI injects it here. The
-// cache maps blob hash -> base64 (or undefined for a known miss); it resets
-// when the session changes.
+// TUI knows only after a session is bound, so KimiTUI injects it here. Only
+// hits are cached: a miss usually means the directory has not been injected
+// yet or the blob has not been flushed, and pinning that miss would leave the
+// preview stuck on the text fallback for the rest of the session.
 let mediaBlobSessionDir: string | undefined;
-const blobBase64Cache = new Map<string, string | undefined>();
+const blobBase64Cache = new Map<string, string>();
 const MAX_BLOB_CACHE_ENTRIES = 64;
 
 export function setMediaBlobSessionDir(dir: string | undefined): void {
@@ -168,7 +169,7 @@ export function setMediaBlobSessionDir(dir: string | undefined): void {
 function resolveBlobBase64(hash: string): string | undefined {
   if (mediaBlobSessionDir === undefined) return undefined;
   const cached = blobBase64Cache.get(hash);
-  if (cached !== undefined || blobBase64Cache.has(hash)) return cached;
+  if (cached !== undefined) return cached;
 
   let base64: string | undefined;
   const agentsDir = join(mediaBlobSessionDir, 'agents');
@@ -184,6 +185,8 @@ function resolveBlobBase64(hash: string): string | undefined {
     base64 = undefined;
   }
 
+  if (base64 === undefined) return undefined;
+
   if (blobBase64Cache.size >= MAX_BLOB_CACHE_ENTRIES) {
     const oldest = blobBase64Cache.keys().next().value;
     if (oldest !== undefined) blobBase64Cache.delete(oldest);
@@ -192,7 +195,7 @@ function resolveBlobBase64(hash: string): string | undefined {
   return base64;
 }
 
-function renderInlineImage(base64: string, mimeType: string, filename?: string): Component {
+function renderInlineImage(base64: string, mimeType: string, filename?: string): Image {
   const theme: ImageTheme = {
     fallbackColor: (s: string) => currentTheme.fg('textDim', s),
   };
@@ -203,38 +206,99 @@ function renderInlineImage(base64: string, mimeType: string, filename?: string):
   });
 }
 
+const EMPTY_LINES: string[] = [];
+
+/**
+ * Body that decides image-vs-text on every render. A replayed blobref can be
+ * read before the session directory is injected or before the blob is flushed,
+ * and the result body outlives both, so a decision baked in at build time
+ * would pin the text fallback for good. Re-resolving here lets the preview
+ * appear on a later repaint without rebuilding the card.
+ */
+class MediaPreviewBody implements Component {
+  private image: Image | undefined;
+  private fallback: { width: number; lines: string[] } | undefined;
+
+  constructor(
+    private readonly summary: ReadMediaSummary,
+    private readonly expanded: boolean,
+  ) {}
+
+  invalidate(): void {
+    this.fallback = undefined;
+    this.image?.invalidate();
+  }
+
+  render(width: number): string[] {
+    const base64 = this.resolveBase64();
+    if (base64 !== undefined) {
+      this.image ??= renderInlineImage(
+        base64,
+        this.summary.mimeType ?? 'image/png',
+        this.summary.path,
+      );
+      const lines = this.image.render(width);
+      if (!this.expanded || this.summary.path === undefined) return lines;
+      return [
+        ...new Text(`  ${currentTheme.dim(this.summary.path)}`, 0, 0).render(width),
+        ...lines,
+      ];
+    }
+
+    if (!this.expanded) return EMPTY_LINES;
+    if (this.fallback === undefined || this.fallback.width !== width) {
+      this.fallback = { width, lines: this.renderText(width) };
+    }
+    return this.fallback.lines;
+  }
+
+  private resolveBase64(): string | undefined {
+    if (this.summary.kind !== 'image') return undefined;
+    const caps = getCapabilities();
+    if (caps.images !== 'kitty' && caps.images !== 'iterm2') return undefined;
+    if (this.summary.base64 !== undefined) return this.summary.base64;
+    if (this.summary.blobHash === undefined) return undefined;
+    return resolveBlobBase64(this.summary.blobHash);
+  }
+
+  private renderText(width: number): string[] {
+    const dim = (text: string): string => currentTheme.dim(text);
+    const out: string[] = [];
+    if (this.summary.path !== undefined) {
+      out.push(...new Text(`  ${dim(this.summary.path)}`, 0, 0).render(width));
+    }
+    const meta = metaSegments(this.summary);
+    const tail: string[] = [this.summary.kind];
+    if (meta.length > 0) tail.push(meta.join(', '));
+    if (this.summary.url !== undefined) tail.push(this.summary.url);
+    out.push(...new Text(`  ${dim(tail.join(' · '))}`, 0, 0).render(width));
+    return out;
+  }
+}
+
 export const readMediaSummary: ResultRenderer = (toolCall, result, ctx) => {
   if (result.is_error) return renderTruncated(toolCall, result, ctx);
   const summary = parseReadMediaOutput(result.output);
   if (summary === null) return renderTruncated(toolCall, result, ctx);
 
-  const dim = (text: string): string => currentTheme.dim(text);
   const caps = getCapabilities();
   const supportsInline = caps.images === 'kitty' || caps.images === 'iterm2';
   const inlineBase64 =
-    summary.base64 ??
-    (summary.blobHash !== undefined ? resolveBlobBase64(summary.blobHash) : undefined);
+    summary.kind === 'image' && supportsInline
+      ? (summary.base64 ??
+        (summary.blobHash !== undefined ? resolveBlobBase64(summary.blobHash) : undefined))
+      : undefined;
   // The image renders in the collapsed body too: capped at MAX_IMAGE_ROWS it
   // IS the compact preview, and gating it behind ctrl+o would make the
   // feature invisible in the default view.
-  if (supportsInline && summary.kind === 'image' && inlineBase64 !== undefined) {
+  if (inlineBase64 !== undefined) {
     const out: Component[] = [];
     if (ctx.expanded && summary.path !== undefined) {
-      out.push(new Text(`  ${dim(summary.path)}`, 0, 0));
+      out.push(new Text(`  ${currentTheme.dim(summary.path)}`, 0, 0));
     }
     out.push(renderInlineImage(inlineBase64, summary.mimeType ?? 'image/png', summary.path));
     return out;
   }
 
-  if (!ctx.expanded) return [];
-  const out: Component[] = [];
-  if (summary.path !== undefined) {
-    out.push(new Text(`  ${dim(summary.path)}`, 0, 0));
-  }
-  const meta = metaSegments(summary);
-  const tail: string[] = [summary.kind];
-  if (meta.length > 0) tail.push(meta.join(', '));
-  if (summary.url !== undefined) tail.push(summary.url);
-  out.push(new Text(`  ${dim(tail.join(' · '))}`, 0, 0));
-  return out;
+  return [new MediaPreviewBody(summary, ctx.expanded)];
 };
