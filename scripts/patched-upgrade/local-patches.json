@@ -17,9 +17,10 @@
       "status": "active"
     },
     {
-      "branch": "fix/wezterm-inline-image",
-      "pr": 2539,
-      "status": "active"
+      "branch": "fix/tui-image-repaint",
+      "pr": null,
+      "status": "active",
+      "localOnly": true
     },
     {
       "branch": "feat/read-media-inline-preview",
