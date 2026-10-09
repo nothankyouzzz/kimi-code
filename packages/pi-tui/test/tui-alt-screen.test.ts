@@ -1264,6 +1264,244 @@ describe("TuiAltScreen", () => {
 		}
 	});
 
+	// What the app actually leaves in the rows an image block reserves: the body
+	// indent plus the segment reset and the empty hyperlink the writer re-opens.
+	// Those rows are not blank strings, so a reserved-row scan that only looks
+	// for `""` silently stops at the first one.
+	const RESERVED_IMAGE_ROW = " \x1b[0m\x1b]8;;\x07";
+	// Rows reserved inside a scrolled view also carry that view's scrollbar glyph.
+	const RESERVED_IMAGE_ROW_WITH_SCROLLBAR = "  \x1b[90m│\x1b[39m";
+
+	it("keeps the reserved rows of a fully visible Kitty image out of the erase pass", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		try {
+			const terminal = new RecordingTerminal(20, 4);
+			const tui = new TuiAltScreen(terminal);
+			const imageId = 910;
+			const imageLine = encodeKitty("AAAA", { columns: 2, rows: 3, imageId, moveCursor: false });
+			registerKittyImageMetadata({ imageId, columns: 2, rows: 3, widthPx: 40, heightPx: 60 });
+			tui.addChild({
+				render: () => [imageLine, RESERVED_IMAGE_ROW, RESERVED_IMAGE_ROW, "tail"],
+				invalidate: () => {},
+			});
+			tui.start();
+			await terminal.waitForRender();
+
+			const frame = terminal.events
+				.filter((event): event is { type: "write"; data: string } => event.type === "write")
+				.map((event) => event.data)
+				.join("");
+			const imageIndex = frame.indexOf(`i=${imageId}`);
+			assert.ok(imageIndex >= 0, "expected a Kitty image sequence");
+			const firstReservedRow = frame.indexOf("\x1b[2;1H\x1b[2K");
+			assert.ok(
+				firstReservedRow >= 0 && firstReservedRow < imageIndex,
+				"reserved rows must be cleared before the image is placed",
+			);
+			assert.strictEqual(
+				frame.indexOf("\x1b[2;1H\x1b[2K", imageIndex),
+				-1,
+				"a reserved row must not be erased after the image is placed",
+			);
+			assert.strictEqual(
+				frame.indexOf("\x1b[3;1H\x1b[2K", imageIndex),
+				-1,
+				"a reserved row must not be erased after the image is placed",
+			);
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+		}
+	});
+
+	it("keeps the reserved rows of a partially visible Kitty image out of the erase pass", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		try {
+			const terminal = new RecordingTerminal(20, 4);
+			const tui = new TuiAltScreen(terminal);
+			const imageId = 911;
+			const imageLine = encodeKitty("AAAA", { columns: 2, rows: 5, imageId, moveCursor: false });
+			registerKittyImageMetadata({ imageId, columns: 2, rows: 5, widthPx: 40, heightPx: 100 });
+			tui.addChild({
+				render: () => [
+					"pad",
+					imageLine,
+					RESERVED_IMAGE_ROW,
+					RESERVED_IMAGE_ROW,
+					RESERVED_IMAGE_ROW,
+					RESERVED_IMAGE_ROW,
+					"tail",
+				],
+				invalidate: () => {},
+			});
+			tui.start();
+			await terminal.waitForRender();
+
+			const frame = terminal.events
+				.filter((event): event is { type: "write"; data: string } => event.type === "write")
+				.map((event) => event.data)
+				.join("");
+			const imageIndex = frame.indexOf(`i=${imageId}`);
+			assert.ok(imageIndex >= 0, "expected a cropped Kitty image sequence");
+			assert.ok(frame.includes("r=3"), "expected the image to be cropped to the viewport");
+			assert.strictEqual(
+				frame.indexOf("\x1b[2;1H\x1b[2K", imageIndex),
+				-1,
+				"a reserved row must not be erased after the image is placed",
+			);
+			assert.strictEqual(
+				frame.indexOf("\x1b[3;1H\x1b[2K", imageIndex),
+				-1,
+				"a reserved row must not be erased after the image is placed",
+			);
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+		}
+	});
+
+	it("clears reserved rows for a placement the metadata registry never saw", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		try {
+			const terminal = new RecordingTerminal(20, 4);
+			const tui = new TuiAltScreen(terminal);
+			// Deliberately no registerKittyImageMetadata: the registry only holds
+			// placements a render in this process registered, so the writer must read
+			// the block height from the placement itself.
+			const imageId = 912;
+			const imageLine = encodeKitty("AAAA", { columns: 2, rows: 3, imageId, moveCursor: false });
+			tui.addChild({
+				render: () => [imageLine, RESERVED_IMAGE_ROW, RESERVED_IMAGE_ROW, "tail"],
+				invalidate: () => {},
+			});
+			tui.start();
+			await terminal.waitForRender();
+
+			const frame = terminal.events
+				.filter((event): event is { type: "write"; data: string } => event.type === "write")
+				.map((event) => event.data)
+				.join("");
+			const imageIndex = frame.indexOf(`i=${imageId}`);
+			assert.ok(imageIndex >= 0, "expected a Kitty image sequence");
+			const firstReservedRow = frame.indexOf("\x1b[2;1H\x1b[2K");
+			assert.ok(
+				firstReservedRow >= 0 && firstReservedRow < imageIndex,
+				"reserved rows must be cleared before the image is placed",
+			);
+			assert.strictEqual(
+				frame.indexOf("\x1b[2;1H\x1b[2K", imageIndex),
+				-1,
+				"a reserved row must not be erased after the image is placed",
+			);
+			assert.strictEqual(
+				frame.indexOf("\x1b[3;1H\x1b[2K", imageIndex),
+				-1,
+				"a reserved row must not be erased after the image is placed",
+			);
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+		}
+	});
+
+	it("clears reserved rows that carry the scroll view's scrollbar", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		try {
+			const terminal = new RecordingTerminal(20, 4);
+			const tui = new TuiAltScreen(terminal);
+			const imageId = 913;
+			const imageLine = encodeKitty("AAAA", { columns: 2, rows: 3, imageId, moveCursor: false });
+			registerKittyImageMetadata({ imageId, columns: 2, rows: 3, widthPx: 40, heightPx: 60 });
+			tui.addChild({
+				render: () => [
+					imageLine,
+					RESERVED_IMAGE_ROW_WITH_SCROLLBAR,
+					RESERVED_IMAGE_ROW_WITH_SCROLLBAR,
+					"tail",
+				],
+				invalidate: () => {},
+			});
+			tui.start();
+			await terminal.waitForRender();
+
+			const frame = terminal.events
+				.filter((event): event is { type: "write"; data: string } => event.type === "write")
+				.map((event) => event.data)
+				.join("");
+			const imageIndex = frame.indexOf(`i=${imageId}`);
+			assert.ok(imageIndex >= 0, "expected a Kitty image sequence");
+			const firstReservedRow = frame.indexOf("\x1b[2;1H\x1b[2K");
+			assert.ok(
+				firstReservedRow >= 0 && firstReservedRow < imageIndex,
+				"reserved rows must be cleared before the image is placed",
+			);
+			assert.strictEqual(
+				frame.indexOf("\x1b[2;1H\x1b[2K", imageIndex),
+				-1,
+				"a reserved row must not be erased after the image is placed",
+			);
+			assert.strictEqual(
+				frame.indexOf("\x1b[3;1H\x1b[2K", imageIndex),
+				-1,
+				"a reserved row must not be erased after the image is placed",
+			);
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+		}
+	});
+
+	it("re-places the image when only a reserved row changes", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		try {
+			const terminal = new RecordingTerminal(20, 4);
+			const tui = new TuiAltScreen(terminal);
+			const imageId = 914;
+			const imageLine = encodeKitty("AAAA", { columns: 2, rows: 3, imageId, moveCursor: false });
+			registerKittyImageMetadata({ imageId, columns: 2, rows: 3, widthPx: 40, heightPx: 60 });
+			// A scroll view paints its scrollbar into the rows a block reserves, so a
+			// reserved row can change while the placement line itself does not.
+			let reservedRow = RESERVED_IMAGE_ROW;
+			tui.addChild({
+				render: () => [imageLine, reservedRow, reservedRow, "tail"],
+				invalidate: () => {},
+			});
+			tui.start();
+			await terminal.waitForRender();
+
+			const eventCount = terminal.events.length;
+			reservedRow = RESERVED_IMAGE_ROW_WITH_SCROLLBAR;
+			tui.requestRender();
+			await terminal.waitForRender();
+
+			const frame = terminal.events
+				.slice(eventCount)
+				.filter((event): event is { type: "write"; data: string } => event.type === "write")
+				.map((event) => event.data)
+				.join("");
+			const imageIndex = frame.indexOf(`i=${imageId}`);
+			assert.ok(imageIndex >= 0, "a changed reserved row must re-place the image");
+			const firstReservedRow = frame.indexOf("\x1b[2;1H\x1b[2K");
+			assert.ok(
+				firstReservedRow >= 0 && firstReservedRow < imageIndex,
+				"reserved rows must be cleared before the image is placed",
+			);
+			assert.strictEqual(
+				frame.indexOf("\x1b[2;1H\x1b[2K", imageIndex),
+				-1,
+				"a reserved row must not be erased after the image is placed",
+			);
+			assert.strictEqual(
+				frame.indexOf("\x1b[3;1H\x1b[2K", imageIndex),
+				-1,
+				"a reserved row must not be erased after the image is placed",
+			);
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+		}
+	});
+
 	it("retains recently offscreen Kitty images for placement-only reuse", async () => {
 		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 		try {

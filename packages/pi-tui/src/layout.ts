@@ -7,6 +7,7 @@ import {
 	extractAnsiCode,
 	getActiveBackgroundAnsi,
 	getGraphemeCellRange,
+	isBlankTerminalLine,
 	sliceByColumn,
 	visibleWidth,
 } from "./utils.ts";
@@ -369,7 +370,9 @@ function paintBox(box: LayoutBox, screen: string[], totalWidth: number): void {
 				}
 				break;
 			}
-			if (imageLine !== "") break;
+			// Reserved rows keep the block's indent, so only a row with visible
+			// content means the scan has left the image block.
+			if (!isBlankTerminalLine(imageLine)) break;
 		}
 	}
 

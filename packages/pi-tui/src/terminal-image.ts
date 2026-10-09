@@ -363,6 +363,19 @@ export function getKittyImageMetadata(line: string): KittyImageMetadata | undefi
 	};
 }
 
+/**
+ * Rows a Kitty placement occupies, read straight from its controls. Callers
+ * that only need the block height (reserving or scanning rows) must not depend
+ * on the metadata registry, which only holds placements registered by a render
+ * in this process.
+ */
+export function extractKittyImageRows(line: string): number | undefined {
+	const controls = /\x1b_G([^;]*);/.exec(line)?.[1];
+	if (controls === undefined) return undefined;
+	const rows = /(?:^|,)r=(\d+)(?:,|$)/.exec(controls)?.[1];
+	return rows === undefined ? undefined : Number.parseInt(rows, 10);
+}
+
 const KITTY_PLACEMENT_CONTROL_KEYS = new Set([
 	"i",
 	"p",

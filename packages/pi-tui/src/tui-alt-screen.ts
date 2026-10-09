@@ -23,6 +23,7 @@ import {
 	deleteAllKittyImages,
 	deleteAllKittyPlacements,
 	deleteKittyImage,
+	extractKittyImageRows,
 	getCapabilities,
 	getKittyImagePlacement,
 	type ImageProtocol,
@@ -53,6 +54,7 @@ import {
 	getGraphemeCellRange,
 	getOsc8LinkAtColumn,
 	getWordSegmenter,
+	isBlankTerminalLine,
 	sliceByColumn,
 	stripTerminalSequences,
 	truncateToWidth,
@@ -71,6 +73,16 @@ const FOCUS_OUT = "\x1b[O";
 const BEGIN_SYNCHRONIZED_OUTPUT = "\x1b[?2026h";
 const END_SYNCHRONIZED_OUTPUT = "\x1b[?2026l";
 const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/;
+
+// The scroll view paints its scrollbar into the rows of its content, including
+// the rows an image block reserves, so a reserved-row scan has to see through
+// those glyphs.
+const SCROLLBAR_GLYPHS = /^[│┃█]+$/;
+
+function isBlankScreenRow(line: string): boolean {
+	if (isBlankTerminalLine(line)) return true;
+	return SCROLLBAR_GLYPHS.test(stripTerminalSequences(line).trim());
+}
 const OSC133_PROMPT_START = /^\x1b\]133;A(?:\x07|\x1b\\)/;
 const PAGE_SCROLL_OVERLAP = 4;
 const ALT_WHEEL_SCROLL_MULTIPLIER = 5;
@@ -481,6 +493,24 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			cachedOffscreenDecodedBytes -= cachedImage.estimatedDecodedBytes;
 		}
 		return { lines, evictedImageDeletion };
+	}
+
+	private getKittyImageReservedRows(screen: string[], row: number, height: number): number {
+		if (this.imageProtocol !== "kitty") return 1;
+		// Read the height from the placement itself: the metadata registry only
+		// holds placements registered by a render in this process, so a reused or
+		// swapped placement would otherwise look like a single row.
+		const rows = extractKittyImageRows(screen[row] ?? "");
+		if (rows === undefined || rows <= 1) return 1;
+
+		const maxRows = Math.min(rows, height - row);
+		let reservedRows = 1;
+		while (reservedRows < maxRows) {
+			const line = screen[row + reservedRows] ?? "";
+			if (isImageLine(line) || !isBlankScreenRow(line)) break;
+			reservedRows++;
+		}
+		return reservedRows;
 	}
 
 	protected override resetRenderState(): void {
@@ -1788,7 +1818,37 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 		buffer += preparedKittyScreen.evictedImageDeletion;
 
+		// A Kitty placement is anchored to the cells where its sequence runs. Erasing
+		// the block's following reserved rows after the sequence pokes holes in the
+		// image, so clear those rows first and let the image line be the last write
+		// within its block.
+		// A Kitty placement is anchored to the cells its sequence runs in, and the
+		// block owns every row it reserves: erasing one of those rows after the
+		// placement pokes a hole in the image, so a change anywhere inside the block
+		// re-places the image and clears the rest of the block first (the same
+		// treatment the main-screen renderer gives a changed block).
+		const preClearedRows = new Set<number>();
 		for (let row = 0; row < height; row++) {
+			if (preClearedRows.has(row)) continue;
+			const reservedRows = this.getKittyImageReservedRows(screen, row, height);
+			if (reservedRows > 1) {
+				let blockChanged = fullRedraw || imagesNeedRedraw || screen[row] !== this.previousScreen[row];
+				if (!blockChanged) {
+					for (let below = row + 1; below < row + reservedRows; below++) {
+						if (screen[below] !== this.previousScreen[below]) {
+							blockChanged = true;
+							break;
+						}
+					}
+				}
+				if (!blockChanged) continue;
+				for (let below = row + 1; below < row + reservedRows; below++) {
+					buffer += `\x1b[${below + 1};1H\x1b[2K${preparedKittyScreen.lines[below] ?? ""}`;
+					preClearedRows.add(below);
+				}
+				buffer += `\x1b[${row + 1};1H\x1b[2K${preparedKittyScreen.lines[row] ?? ""}`;
+				continue;
+			}
 			if (!fullRedraw && !imagesNeedRedraw && screen[row] === this.previousScreen[row]) continue;
 			buffer += `\x1b[${row + 1};1H\x1b[2K${preparedKittyScreen.lines[row] ?? ""}`;
 		}

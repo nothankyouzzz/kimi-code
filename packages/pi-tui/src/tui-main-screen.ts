@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { deleteKittyImage, isImageLine } from "./terminal-image.ts";
 import { SEGMENT_RESET, type TUI, TuiBase, type TuiStopOptions } from "./tui.ts";
-import { asciiVisibleWidth, normalizeTerminalOutput, sliceByColumn, visibleWidth } from "./utils.ts";
+import { asciiVisibleWidth, isBlankTerminalLine, normalizeTerminalOutput, sliceByColumn, visibleWidth } from "./utils.ts";
 
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
 const MAX_RENDER_WRITE_CHARS = 1024 * 1024;
@@ -218,7 +218,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		let reservedRows = 1;
 		while (reservedRows < maxRows) {
 			const line = lines[index + reservedRows] ?? "";
-			if (isImageLine(line) || visibleWidth(line) > 0) break;
+			if (isImageLine(line) || !isBlankTerminalLine(line)) break;
 			reservedRows++;
 		}
 		return reservedRows;
