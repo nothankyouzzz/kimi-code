@@ -1,11 +1,16 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { deleteKittyImage, isImageLine } from "./terminal-image.ts";
+import {
+	collectImageRowBlocks,
+	deleteKittyImage,
+	type ImageRowBlock,
+	isImageLine,
+	parseKittyPlacementHeader,
+} from "./terminal-image.ts";
 import { SEGMENT_RESET, type TUI, TuiBase, type TuiStopOptions } from "./tui.ts";
-import { asciiVisibleWidth, isBlankTerminalLine, normalizeTerminalOutput, sliceByColumn, visibleWidth } from "./utils.ts";
+import { asciiVisibleWidth, normalizeTerminalOutput, sliceByColumn, visibleWidth } from "./utils.ts";
 
-const KITTY_SEQUENCE_PREFIX = "\x1b_G";
 const MAX_RENDER_WRITE_CHARS = 1024 * 1024;
 
 /**
@@ -76,37 +81,8 @@ class BoundedTerminalWriter {
 /** Shared empty id list for non-image lines in the per-line image-id cache. */
 const EMPTY_IMAGE_IDS: readonly number[] = [];
 
-interface KittyImageHeader {
-	ids: number[];
-	rows: number;
-}
-
-function parseKittyImageHeader(line: string): KittyImageHeader | undefined {
-	const sequenceStart = line.indexOf(KITTY_SEQUENCE_PREFIX);
-	if (sequenceStart === -1) return undefined;
-	const paramsStart = sequenceStart + KITTY_SEQUENCE_PREFIX.length;
-	const paramsEnd = line.indexOf(";", paramsStart);
-	if (paramsEnd === -1) return undefined;
-
-	const ids: number[] = [];
-	let rows = 1;
-	for (const param of line.slice(paramsStart, paramsEnd).split(",")) {
-		const [key, value] = param.split("=", 2);
-		if (value === undefined) continue;
-		const numberValue = Number(value);
-		if (!Number.isInteger(numberValue) || numberValue <= 0 || numberValue > 0xffffffff) continue;
-		if (key === "i") ids.push(numberValue);
-		else if (key === "r") rows = numberValue;
-	}
-	return { ids, rows };
-}
-
-function extractKittyImageIds(line: string): number[] {
-	return parseKittyImageHeader(line)?.ids ?? [];
-}
-
-function extractKittyImageRows(line: string): number {
-	return parseKittyImageHeader(line)?.rows ?? 1;
+function extractKittyImageIds(line: string): readonly number[] {
+	return parseKittyPlacementHeader(line)?.imageIds ?? EMPTY_IMAGE_IDS;
 }
 
 function isTermuxSession(): boolean {
@@ -210,41 +186,37 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		return buffer;
 	}
 
-	private getKittyImageReservedRows(lines: string[], index: number, maxIndex = lines.length - 1): number {
-		const rows = extractKittyImageRows(lines[index] ?? "");
-		if (rows <= 1) return 1;
-
-		const maxRows = Math.min(rows, maxIndex - index + 1, lines.length - index);
-		let reservedRows = 1;
-		while (reservedRows < maxRows) {
-			const line = lines[index + reservedRows] ?? "";
-			if (isImageLine(line) || !isBlankTerminalLine(line)) break;
-			reservedRows++;
-		}
-		return reservedRows;
+	private getImageReservedRows(
+		blockRows: ReadonlyMap<number, number>,
+		index: number,
+		maxIndex: number,
+		lineCount: number,
+	): number {
+		const rows = blockRows.get(index);
+		if (rows === undefined || rows <= 1) return 1;
+		return Math.min(rows, maxIndex - index + 1, lineCount - index);
 	}
 
 	private expandChangedRangeForKittyImages(
 		firstChanged: number,
 		lastChanged: number,
-		newLines: string[],
-		newLineImageIds: ReadonlyArray<number>[],
+		previousBlocks: readonly ImageRowBlock[],
+		newBlocks: readonly ImageRowBlock[],
 	): { firstChanged: number; lastChanged: number } {
 		let expandedFirstChanged = firstChanged;
 		let expandedLastChanged = lastChanged;
-		const expandForLines = (lines: string[], lineImageIds: ReadonlyArray<number>[]): void => {
-			for (let i = 0; i < lines.length; i++) {
-				if ((lineImageIds[i] ?? EMPTY_IMAGE_IDS).length === 0) continue;
-				const blockEnd = i + this.getKittyImageReservedRows(lines, i) - 1;
-				if (i >= firstChanged || (i <= lastChanged && blockEnd >= firstChanged)) {
-					expandedFirstChanged = Math.min(expandedFirstChanged, i);
+		const expandForBlocks = (blocks: readonly ImageRowBlock[]): void => {
+			for (const block of blocks) {
+				const blockEnd = block.row + block.rows - 1;
+				if (block.row >= firstChanged || (block.row <= lastChanged && blockEnd >= firstChanged)) {
+					expandedFirstChanged = Math.min(expandedFirstChanged, block.row);
 					expandedLastChanged = Math.max(expandedLastChanged, blockEnd);
 				}
 			}
 		};
 
-		expandForLines(this.previousLines, this.previousLineImageIds);
-		expandForLines(newLines, newLineImageIds);
+		expandForBlocks(previousBlocks);
+		expandForBlocks(newBlocks);
 		return { firstChanged: expandedFirstChanged, lastChanged: expandedLastChanged };
 	}
 
@@ -328,6 +300,15 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		}
 		newLines = processedLines;
 
+		// Change-range expansion follows every placement, single-row included, so a
+		// change above a placement still re-emits it. Row reservation only follows
+		// multi-row blocks: a single-row placement owns no extra rows.
+		const imageBlocks = collectImageRowBlocks(newLines, [], 1);
+		const imageBlockRows = new Map<number, number>();
+		for (const block of imageBlocks) {
+			if (block.rows > 1) imageBlockRows.set(block.row, block.rows);
+		}
+
 		// Helper to clear scrollback and viewport and render all new lines
 		const fullRender = (clear: boolean): void => {
 			this.fullRedrawCount += 1;
@@ -341,7 +322,9 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				if (i > 0) output.append("\r\n");
 				const line = newLines[i]!;
 				const isImage = isImageLine(line);
-				const imageReservedRows = isImage ? this.getKittyImageReservedRows(newLines, i) : 1;
+				const imageReservedRows = isImage
+					? this.getImageReservedRows(imageBlockRows, i, newLines.length - 1, newLines.length)
+					: 1;
 				if (imageReservedRows > 1 && imageReservedRows <= height) {
 					for (let row = 1; row < imageReservedRows; row++) {
 						output.append("\r\n");
@@ -442,8 +425,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			const expandedRange = this.expandChangedRangeForKittyImages(
 				firstChanged,
 				lastChanged,
-				newLines,
-				lineImageIds,
+				collectImageRowBlocks(this.previousLines, [], 1),
+				imageBlocks,
 			);
 			firstChanged = expandedRange.firstChanged;
 			lastChanged = expandedRange.lastChanged;
@@ -560,7 +543,9 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			if (i > firstChanged) output.append("\r\n");
 			const line = newLines[i]!;
 			const isImage = isImageLine(line);
-			const imageReservedRows = isImage ? this.getKittyImageReservedRows(newLines, i, renderEnd) : 1;
+			const imageReservedRows = isImage
+				? this.getImageReservedRows(imageBlockRows, i, renderEnd, newLines.length)
+				: 1;
 			if (imageReservedRows > 1) {
 				const imageStartScreenRow = i - viewportTop;
 				if (imageStartScreenRow < 0 || imageStartScreenRow + imageReservedRows > height) {

@@ -5,7 +5,12 @@ import { ScrollView } from "../src/components/scroll-view.ts";
 import { Text } from "../src/components/text.ts";
 import { VStack } from "../src/components/v-stack.ts";
 import { renderLayoutFrame } from "../src/layout.ts";
-import { encodeKitty, registerKittyImageMetadata } from "../src/terminal-image.ts";
+import {
+	collectImageRowBlocks,
+	collectImageRowBlocksCached,
+	encodeKitty,
+	registerKittyImageMetadata,
+} from "../src/terminal-image.ts";
 import { stripTerminalSequences } from "../src/utils.ts";
 
 function visibleLines(lines: string[]): string[] {
@@ -143,6 +148,30 @@ describe("viewport layout", () => {
 		);
 
 		assert.ok(frame.lines[2]?.includes("y=0,h=34,r=1"));
+	});
+
+	it("collects image blocks without sniffing one out of a block's residual sequence", () => {
+		const imageLine = encodeKitty("AAAA", { columns: 2, rows: 3, imageId: 125, moveCursor: false });
+		// A sequence left behind inside a block's own rows must not start a second one.
+		const residual = "\x1b_Ga=p,q=2,i=126,r=4\x1b\\";
+		assert.deepStrictEqual(collectImageRowBlocks(["head", imageLine, residual, "tail", "end"]), [
+			{ row: 1, rows: 3 },
+		]);
+		// A single-row placement owns no extra rows, and a control-less line is not a block.
+		assert.deepStrictEqual(collectImageRowBlocks(["\x1b_Ga=p,q=2,i=1,r=1\x1b\\", "\x1b_Gi=2;\x1b\\", "text"]), []);
+		// The all-placements collection keeps single-row placements for change tracking.
+		assert.deepStrictEqual(
+			collectImageRowBlocks(["\x1b_Ga=p,q=2,i=1,r=1\x1b\\", "\x1b_Gi=2;\x1b\\", "text"], [], 1),
+			[{ row: 1, rows: 1 }],
+		);
+	});
+
+	it("memoizes collected image blocks by line-array identity", () => {
+		const lines = ["head", encodeKitty("AAAA", { columns: 2, rows: 3, imageId: 127, moveCursor: false }), "", "", "end"];
+		const first = collectImageRowBlocksCached(lines);
+		assert.deepStrictEqual(first, [{ row: 1, rows: 3 }]);
+		assert.strictEqual(collectImageRowBlocksCached(lines), first);
+		assert.notStrictEqual(collectImageRowBlocksCached([...lines]), first);
 	});
 
 	it("composes horizontal children at allocated widths", () => {
@@ -311,6 +340,30 @@ describe("viewport layout", () => {
 		assert.strictEqual(thumbHeightFor(40), 10);
 		assert.strictEqual(thumbHeightFor(100), 4);
 		assert.strictEqual(thumbHeightFor(400), 2);
+	});
+
+	it("registers the scrollbar cell of a row that carries a Kitty placement", () => {
+		const trackColor = "\x1b[38;5;2m";
+		const scrollbarTrackStyle = (text: string) => `${trackColor}${text}\x1b[39m`;
+		const imageId = 4242;
+		const imageLine = encodeKitty("AAAA", { columns: 2, rows: 1, imageId, moveCursor: false });
+		registerKittyImageMetadata({ imageId, columns: 2, rows: 1, widthPx: 40, heightPx: 40 });
+		const content = {
+			render: () => [imageLine, "one", "two", "three", "four", "five"],
+			invalidate: () => {},
+		};
+		const scrollView = new ScrollView(content, { scrollbar: "always", scrollbarTrackStyle });
+		renderLayoutFrame(scrollView, 6, 4, () => {}); // measure the viewport before asserting
+
+		const frame = renderLayoutFrame(scrollView, 6, 4, () => {});
+		// The placement line is emitted verbatim; its scrollbar cell is handed to the
+		// writer as a positioned cell instead of being spliced into the line.
+		assert.ok(!frame.lines[0]?.includes(trackColor), "the placement line must not carry the scrollbar cell");
+		assert.doesNotMatch(stripTerminalSequences(frame.lines[0] ?? ""), /[│┃█]/);
+		const cell = frame.scrollbarCells.find((entry) => entry.row === 0);
+		assert.ok(cell, "expected a scrollbar cell registered for the placement row");
+		assert.strictEqual(cell.column, 5);
+		assert.match(cell.replacement, /[│┃█]/);
 	});
 
 	it("preserves only the underlying background beneath overlay scrollbar glyphs", () => {

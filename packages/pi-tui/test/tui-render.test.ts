@@ -1090,6 +1090,35 @@ describe("TUI steady-frame processed-line reuse", () => {
 		}
 	});
 
+	it("redraws a single-row kitty placement when a line above it changes", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		try {
+			const terminal = new LoggingVirtualTerminal(40, 10);
+			const tui = new TuiMainScreen(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+			const imageLine = encodeKitty("AAAA", { columns: 2, rows: 1, imageId: 88, moveCursor: false });
+			component.lines = ["header", imageLine, "footer"];
+			tui.start();
+			await terminal.waitForRender();
+			terminal.clearWrites();
+
+			component.lines = ["header2", imageLine, "footer"];
+			tui.requestRender();
+			await terminal.waitForRender();
+
+			const writes = terminal.getWrites();
+			assert.ok(writes.includes("header2"), "changed line should be written");
+			assert.ok(
+				writes.includes(imageLine),
+				"a single-row placement must be re-emitted when a line above it changes",
+			);
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+		}
+	});
+
 	it("does not rewrite a kitty image on an identical frame", async () => {
 		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 		setCellDimensions({ widthPx: 10, heightPx: 10 });

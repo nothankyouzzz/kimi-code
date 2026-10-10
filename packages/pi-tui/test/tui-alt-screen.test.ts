@@ -1502,6 +1502,90 @@ describe("TuiAltScreen", () => {
 		}
 	});
 
+	// The scrollbar cell of a placement row is not part of the line: the writer
+	// appends it after the content by positioning the cursor into the column.
+	const SCROLLED_PLACEMENT_CONTENT = ["head", "IMAGE", "one", "two", "three", "four", "five", "six"];
+
+	it("appends the scrollbar cell of a placement row after the row content", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		try {
+			const terminal = new RecordingTerminal(20, 4);
+			const tui = new TuiAltScreen(terminal);
+			const imageId = 916;
+			const imageLine = encodeKitty("AAAA", { columns: 2, rows: 3, imageId, moveCursor: false });
+			registerKittyImageMetadata({ imageId, columns: 2, rows: 3, widthPx: 40, heightPx: 60 });
+			const content = SCROLLED_PLACEMENT_CONTENT.map((line) => (line === "IMAGE" ? imageLine : line));
+			const scrollView = new ScrollView(
+				{ render: () => content, invalidate: () => {} },
+				{ primary: true, scrollbar: "auto" },
+			);
+			tui.setLayoutRoot(scrollView);
+			tui.start();
+			await terminal.waitForRender();
+			scrollView.scrollBy(1);
+			await terminal.waitForRender();
+
+			const writes = terminal.events
+				.filter((event): event is { type: "write"; data: string } => event.type === "write")
+				.map((event) => event.data)
+				.join("");
+			const imageIndex = writes.indexOf(`i=${imageId}`);
+			assert.ok(imageIndex >= 0, "expected a Kitty image sequence");
+			const positioned = writes.indexOf("\x1b[20G", imageIndex);
+			assert.ok(positioned >= 0, "expected the placement row's scrollbar cell to be appended");
+			assert.match(writes.slice(positioned, positioned + 30), /[│┃]/);
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+		}
+	});
+
+	it("rewrites a placement row when its scrollbar cell disappears", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		try {
+			const terminal = new RecordingTerminal(20, 4);
+			const tui = new TuiAltScreen(terminal);
+			const imageId = 917;
+			// A single-row placement owns no reserved rows, so the hide frame has
+			// nothing else to change on its row: only cell tracking can rewrite it.
+			const imageLine = encodeKitty("AAAA", { columns: 2, rows: 1, imageId, moveCursor: false });
+			registerKittyImageMetadata({ imageId, columns: 2, rows: 1, widthPx: 40, heightPx: 40 });
+			const content = SCROLLED_PLACEMENT_CONTENT.map((line) => (line === "IMAGE" ? imageLine : line));
+			const scrollView = new ScrollView(
+				{ render: () => content, invalidate: () => {} },
+				{ primary: true, scrollbar: "auto", scrollbarHideDelayMs: 10 },
+			);
+			tui.setLayoutRoot(scrollView);
+			tui.start();
+			await terminal.waitForRender();
+			scrollView.scrollBy(1);
+			await terminal.waitForRender();
+			scrollView.setScrollbarActive(true);
+			await terminal.waitForRender();
+			// Force the active -> inactive transition frame while the bar is still
+			// visible, so the captured range holds only the hide frame.
+			scrollView.setScrollbarActive(false);
+			tui.renderNow();
+			const eventCount = terminal.events.length;
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			await terminal.waitForRender();
+
+			const writes = terminal.events
+				.slice(eventCount)
+				.filter((event): event is { type: "write"; data: string } => event.type === "write")
+				.map((event) => event.data)
+				.join("");
+			assert.ok(
+				writes.includes("\x1b[1;1H\x1b[2K"),
+				`expected the placement row to be rewritten; got ${JSON.stringify(writes.slice(0, 200))}`,
+			);
+			assert.ok(!writes.includes("\x1b[20G"), "the hidden scrollbar must not leave a positioned cell behind");
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+		}
+	});
+
 	it("retains recently offscreen Kitty images for placement-only reuse", async () => {
 		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 		try {

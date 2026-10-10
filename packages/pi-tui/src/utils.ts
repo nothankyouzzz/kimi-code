@@ -311,15 +311,6 @@ export function stripTerminalSequences(str: string): string {
 	return result;
 }
 
-/**
- * True when a rendered line carries no visible content. Blank rows keep the
- * body indent plus the segment reset and an empty hyperlink, so a row an image
- * block reserves is never an empty string.
- */
-export function isBlankTerminalLine(line: string): boolean {
-	return stripTerminalSequences(line).trim() === "";
-}
-
 interface GraphemeCellRange {
 	start: number;
 	end: number;

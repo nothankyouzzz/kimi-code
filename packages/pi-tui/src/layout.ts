@@ -1,16 +1,16 @@
 import type { ScrollView } from "./components/scroll-view.ts";
 import { allocateStackSizes, visibleStackEntries } from "./components/stack.ts";
 import { getLayoutNode } from "./layout-node.ts";
-import { cropKittyImageLine, getKittyImageMetadata, isImageLine } from "./terminal-image.ts";
-import { type Component, CURSOR_MARKER, compositeTuiLine } from "./tui.ts";
 import {
-	extractAnsiCode,
-	getActiveBackgroundAnsi,
-	getGraphemeCellRange,
-	isBlankTerminalLine,
-	sliceByColumn,
-	visibleWidth,
-} from "./utils.ts";
+	collectImageRowBlocksCached,
+	cropKittyImageLine,
+	getKittyImageMetadata,
+	type ImageRowBlock,
+	isImageLine,
+	parseKittyPlacementHeader,
+} from "./terminal-image.ts";
+import { type Component, CURSOR_MARKER, compositeTuiLine } from "./tui.ts";
+import { extractAnsiCode, getActiveBackgroundAnsi, getGraphemeCellRange, sliceByColumn, visibleWidth } from "./utils.ts";
 
 const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/;
 
@@ -34,12 +34,23 @@ export interface LayoutBox {
 	layer: number;
 }
 
+/** A scrollbar glyph the writer appends to a row it cannot splice into. */
+export interface ScrollbarCell {
+	readonly row: number;
+	readonly column: number;
+	readonly replacement: string;
+}
+
 export interface LayoutFrame {
 	root: LayoutBox;
 	width: number;
 	height: number;
 	lines: string[];
 	primaryScrollView?: ScrollView;
+	/** Kitty image blocks actually painted this frame, in screen rows. */
+	imageBlocks: readonly ImageRowBlock[];
+	/** Scrollbar glyphs to append after the row content, in screen rows. */
+	scrollbarCells: readonly ScrollbarCell[];
 }
 
 export interface ScrollbarGeometry {
@@ -307,7 +318,13 @@ export function getScrollbarGeometry(box: LayoutBox, includeHiddenAuto = false):
 	};
 }
 
-function paintScrollbar(box: LayoutBox, screen: string[], totalWidth: number): void {
+function paintScrollbar(
+	box: LayoutBox,
+	screen: string[],
+	totalWidth: number,
+	imageBlocks: readonly ImageRowBlock[],
+	scrollbarCells: ScrollbarCell[],
+): void {
 	const geometry = getScrollbarGeometry(box);
 	if (!geometry || !box.scrollView) return;
 
@@ -318,6 +335,14 @@ function paintScrollbar(box: LayoutBox, screen: string[], totalWidth: number): v
 		const replacement = isThumb
 			? box.scrollView.scrollbarThumbStyle(box.scrollView.isScrollbarActive ? "█" : "┃")
 			: box.scrollView.scrollbarTrackStyle("│");
+		// A Kitty placement line cannot be recomposed cell by cell without breaking
+		// its sequence, so its scrollbar cell is not spliced into the line. It is
+		// handed to the writer, which appends it after the row content by
+		// positioning the cursor into the column.
+		if (imageBlocks.some((block) => block.row === row)) {
+			scrollbarCells.push({ row, column: geometry.column, replacement });
+			continue;
+		}
 		screen[row] = replaceScrollbarCell(
 			screen[row] ?? "",
 			geometry.column,
@@ -328,7 +353,13 @@ function paintScrollbar(box: LayoutBox, screen: string[], totalWidth: number): v
 	}
 }
 
-function paintBox(box: LayoutBox, screen: string[], totalWidth: number): void {
+function paintBox(
+	box: LayoutBox,
+	screen: string[],
+	totalWidth: number,
+	imageBlocks: ImageRowBlock[],
+	scrollbarCells: ScrollbarCell[],
+): void {
 	if (box.lines) {
 		const offset = box.lineOffset ?? 0;
 		const firstRow = Math.max(box.rect.y, box.clip.y, 0);
@@ -336,6 +367,8 @@ function paintBox(box: LayoutBox, screen: string[], totalWidth: number): void {
 		for (let row = firstRow; row < lastRow; row++) {
 			const sourceLine = box.lines[offset + row - box.rect.y];
 			if (sourceLine === undefined) continue;
+			const header = parseKittyPlacementHeader(sourceLine);
+			if (header) imageBlocks.push({ row, rows: header.rows });
 			let line = sourceLine.replace(OSC133_ZONE_PREFIX, "");
 			const imageMetadata = getKittyImageMetadata(line);
 			if (imageMetadata) {
@@ -355,28 +388,33 @@ function paintBox(box: LayoutBox, screen: string[], totalWidth: number): void {
 			}
 		}
 	}
-	for (const child of box.children) paintBox(child, screen, totalWidth);
+	for (const child of box.children) paintBox(child, screen, totalWidth, imageBlocks, scrollbarCells);
 
 	if (box.scrollView && box.scrollContentLines && box.scrollView.scrollTop > 0 && box.rect.height > 0) {
-		for (let imageRow = box.scrollView.scrollTop - 1; imageRow >= 0; imageRow--) {
-			const imageLine = box.scrollContentLines[imageRow] ?? "";
+		const scrollTop = box.scrollView.scrollTop;
+		let block: ImageRowBlock | undefined;
+		for (const candidate of collectImageRowBlocksCached(box.scrollContentLines)) {
+			if (candidate.row < scrollTop && scrollTop - candidate.row < candidate.rows) block = candidate;
+		}
+		if (block) {
+			const imageLine = box.scrollContentLines[block.row] ?? "";
 			const metadata = getKittyImageMetadata(imageLine);
 			if (metadata) {
-				const hiddenRows = box.scrollView.scrollTop - imageRow;
+				const hiddenRows = scrollTop - block.row;
 				if (hiddenRows < metadata.rows) {
 					const visibleRows = Math.min(box.rect.height, metadata.rows - hiddenRows);
 					const cropped = cropKittyImageLine(imageLine, hiddenRows, visibleRows);
-					if (box.rect.x === 0 && box.rect.width >= totalWidth) screen[box.rect.y] = cropped;
+					if (box.rect.x === 0 && box.rect.width >= totalWidth) {
+						screen[box.rect.y] = cropped;
+						const rows = parseKittyPlacementHeader(cropped)?.rows;
+						if (rows !== undefined) imageBlocks.push({ row: box.rect.y, rows });
+					}
 				}
-				break;
 			}
-			// Reserved rows keep the block's indent, so only a row with visible
-			// content means the scan has left the image block.
-			if (!isBlankTerminalLine(imageLine)) break;
 		}
 	}
 
-	paintScrollbar(box, screen, totalWidth);
+	paintScrollbar(box, screen, totalWidth, imageBlocks, scrollbarCells);
 }
 
 export function renderLayoutFrame(
@@ -400,12 +438,16 @@ export function renderLayoutFrame(
 		height: safeHeight,
 	});
 	const lines = Array.from({ length: safeHeight }, () => "");
-	paintBox(rootBox, lines, safeWidth);
+	const imageBlocks: ImageRowBlock[] = [];
+	const scrollbarCells: ScrollbarCell[] = [];
+	paintBox(rootBox, lines, safeWidth, imageBlocks, scrollbarCells);
 	return {
 		root: rootBox,
 		width: safeWidth,
 		height: safeHeight,
 		lines,
+		imageBlocks,
+		scrollbarCells,
 		...(context.primaryScrollView === undefined ? {} : { primaryScrollView: context.primaryScrollView }),
 	};
 }

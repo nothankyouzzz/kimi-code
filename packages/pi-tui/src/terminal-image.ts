@@ -363,17 +363,61 @@ export function getKittyImageMetadata(line: string): KittyImageMetadata | undefi
 	};
 }
 
-/**
- * Rows a Kitty placement occupies, read straight from its controls. Callers
- * that only need the block height (reserving or scanning rows) must not depend
- * on the metadata registry, which only holds placements registered by a render
- * in this process.
- */
-export function extractKittyImageRows(line: string): number | undefined {
-	const controls = /\x1b_G([^;]*);/.exec(line)?.[1];
-	if (controls === undefined) return undefined;
-	const rows = /(?:^|,)r=(\d+)(?:,|$)/.exec(controls)?.[1];
-	return rows === undefined ? undefined : Number.parseInt(rows, 10);
+export interface KittyPlacementHeader {
+	readonly imageIds: readonly number[];
+	readonly rows: number;
+}
+
+/** Parse a Kitty placement line's controls: the image ids it references and the rows it occupies. */
+export function parseKittyPlacementHeader(line: string): KittyPlacementHeader | undefined {
+	const sequenceStart = line.indexOf(KITTY_PREFIX);
+	if (sequenceStart === -1) return undefined;
+	const paramsStart = sequenceStart + KITTY_PREFIX.length;
+	const paramsEnd = line.indexOf(";", paramsStart);
+	if (paramsEnd === -1) return undefined;
+
+	const imageIds: number[] = [];
+	let rows = 1;
+	for (const param of line.slice(paramsStart, paramsEnd).split(",")) {
+		const [key, value] = param.split("=", 2);
+		if (value === undefined) continue;
+		const numberValue = Number(value);
+		if (!Number.isInteger(numberValue) || numberValue <= 0 || numberValue > 0xffffffff) continue;
+		if (key === "i") imageIds.push(numberValue);
+		else if (key === "r") rows = numberValue;
+	}
+	return { imageIds, rows };
+}
+
+export interface ImageRowBlock {
+	readonly row: number;
+	readonly rows: number;
+}
+
+/** Row spans each Kitty placement owns, so consumers never infer blocks from content. */
+export function collectImageRowBlocks(
+	lines: readonly string[],
+	into: ImageRowBlock[] = [],
+	minimumRows = 2,
+): ImageRowBlock[] {
+	for (let row = 0; row < lines.length; row++) {
+		const header = parseKittyPlacementHeader(lines[row] ?? "");
+		if (!header || header.rows < minimumRows) continue;
+		into.push({ row, rows: header.rows });
+		row += header.rows - 1;
+	}
+	return into;
+}
+
+const imageRowBlockCache = new WeakMap<readonly string[], readonly ImageRowBlock[]>();
+
+/** `collectImageRowBlocks` memoized by line-array identity, for callers that re-scan a stable array every frame. */
+export function collectImageRowBlocksCached(lines: readonly string[]): readonly ImageRowBlock[] {
+	const cached = imageRowBlockCache.get(lines);
+	if (cached) return cached;
+	const blocks = collectImageRowBlocks(lines);
+	imageRowBlockCache.set(lines, blocks);
+	return blocks;
 }
 
 const KITTY_PLACEMENT_CONTROL_KEYS = new Set([
