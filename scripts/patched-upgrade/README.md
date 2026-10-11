@@ -15,25 +15,26 @@ live copies used at runtime are in `~/.kimi-code/`.
   rebased onto the current upstream main there, so the remote copy is
   authoritative — and strictly-behind local branches are fast-forwarded to it,
   so the branches an agent inspects afterwards match the ones the build used.
-  The script fast-forwards
-  the local `main` to `upstream/main`,
-  gates on a merge-conflict check (every active patch branch must merge
-  cleanly into `upstream/main`, simulated with `git merge-tree` — the
-  branches are never modified), cherry-picks the patches onto the target
-  release tag, type-checks the packages the patches touched (a patch
-  referencing a module upstream renamed or moved fails here with the
-  responsible patch named, instead of as a bare build error), rebuilds, and
-  atomically swaps `~/.kimi-code/bin/kimi`.
+  The script fast-forwards the local `main` to `upstream/main`, scans active
+  patch branches for merge conflicts vs `upstream/main` (simulated with `git
+  merge-tree` — the branches are never modified; warns by default and continues
+  the build because the build baseline is the release tag, not `upstream/main`,
+  with `STRICT_UPSTREAM_MERGE=1` restoring the hard gate), cherry-picks the
+  patches onto the target release tag, type-checks the packages the patches
+  touched (a patch referencing a module upstream renamed or moved fails here
+  with the responsible patch named, instead of as a bare build error),
+  rebuilds, and atomically swaps `~/.kimi-code/bin/kimi`.
   Idempotent: no rebuild when the release AND the patch fingerprint are
   unchanged. Conflict policy: conflicts confined to generated docs manifests
   (`docs/state-manifest.d.ts`, whose embedded compiler symbol ids drift on
   every regeneration) are tolerated in the check and auto-resolved during
-  cherry-pick by taking the patch side; any other conflict fails fast and
-  leaves the installed binary untouched. The gate reports every offending
-  branch at once — a single run names the full fix list rather than dying on
-  the first conflict. A startup self-check also compares the live hook script,
-  companion skill, and patch registry against their versioned source on
-  `local/upgrade-hook` (blob comparison via `git hash-object` / `git show`, so
+  cherry-pick by taking the patch side; any other conflict in the merge check
+  warns by default (fatal under `STRICT_UPSTREAM_MERGE=1`), while cherry-pick
+  conflicts fail fast and leave the installed binary untouched. The gate reports
+  every offending branch at once — a single run names the full fix list rather
+  than dying on the first conflict. A startup self-check also compares the live
+  hook script, companion skill, and patch registry against their versioned source
+  on `local/upgrade-hook` (blob comparison via `git hash-object` / `git show`, so
   it does not depend on the branch currently checked out): drift warns by
   default, and `KIMI_UPGRADE_STRICT_SELFCHECK=1` makes a hook-script or
   registry drift fatal (the skill mismatch only ever warns — it does not
@@ -116,6 +117,7 @@ kimi upgrade                           # rebuilds the patched binary
   `KIMI_PATCH_REPO` / `KIMI_PATCH_STATE` override the script's defaults;
   `KIMI_PATCH_LOCAL=1` sources patch branches from the local branches instead
   of `origin` and skips the origin fetch (the development loop);
+  `STRICT_UPSTREAM_MERGE=1` restores fatal merge-conflict checks vs upstream/main;
   `DRY_RUN=1` prints the plan without building; `FORCE=1` rebuilds anyway;
   `SKIP_TYPECHECK=1` bypasses the pre-build type-check gate.
 - The script fails fast when `node --version` does not match `.nvmrc` — the

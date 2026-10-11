@@ -56,7 +56,8 @@ jq --argjson branches "$CLEAN_BRANCHES" \
   '{patches: [.patches[] | select(.branch as $b | $branches | index($b))], state: .state}' \
   "$LIVE_STATE" > "$TMP_CLEAN_REGISTRY"
 if OUT=$(KIMI_PATCH_REPO="$REPO_DIR" KIMI_PATCH_STATE="$TMP_CLEAN_REGISTRY" DRY_RUN=1 bash "$PIPELINE" 2>&1); then
-  if printf '%s\n' "$OUT" | grep -q "DRY_RUN=1 — stopping before build"; then
+  if printf '%s\n' "$OUT" | grep -q "DRY_RUN=1 — stopping before build" \
+    && printf '%s\n' "$OUT" | grep -q "merge-conflict check vs upstream/main passed for"; then
     pass "clean DRY_RUN stops at the build gate ($(printf '%s' "$CLEAN_BRANCHES" | jq 'length') clean branch(es))"
   else
     fail "DRY_RUN finished without the expected stop message"
@@ -117,8 +118,8 @@ else
   fi
 fi
 
-# 4. Multi-conflict gate: reports all conflicting branches at once
-echo "4. multi-conflict gate: reports all branches in one run"
+# 4. Multi-conflict gate: warns and continues by default, dies under strict
+echo "4. multi-conflict gate: warns and continues by default, dies under strict"
 git -C "$REPO_DIR" branch -D test/smoke-fake-1 test/smoke-fake-2 2>/dev/null || true
 # Two fixture branches guaranteed to conflict with upstream/main whatever
 # upstream changed: each is based on upstream/main~4 and clobbers a file that
@@ -146,15 +147,38 @@ git -C "$REPO_DIR" checkout -q local/upgrade-hook
 
 TMP_MULTI_REGISTRY="$TMP_DIR/multi.json"
 jq '.patches += [{"branch":"test/smoke-fake-1","pr":null,"status":"active"},{"branch":"test/smoke-fake-2","pr":null,"status":"active"}]' \
-  "$LIVE_STATE" > "$TMP_MULTI_REGISTRY"
+  "$TMP_CLEAN_REGISTRY" > "$TMP_MULTI_REGISTRY"
 
-OUT=$(KIMI_PATCH_REPO="$REPO_DIR" KIMI_PATCH_STATE="$TMP_MULTI_REGISTRY" DRY_RUN=1 bash "$PIPELINE" 2>&1 || true)
-if printf '%s\n' "$OUT" | grep -q "patch test/smoke-fake-1 has merge conflicts" \
-  && printf '%s\n' "$OUT" | grep -q "patch test/smoke-fake-2 has merge conflicts"; then
-  pass "both conflicting branches reported in single exit message"
+# Default mode: warns on both conflicting branches and continues to DRY_RUN stop
+if OUT=$(KIMI_PATCH_REPO="$REPO_DIR" KIMI_PATCH_STATE="$TMP_MULTI_REGISTRY" DRY_RUN=1 bash "$PIPELINE" 2>&1); then
+  RC=0
 else
-  fail "multi-conflict gate did not report both branches: $OUT"
+  RC=$?
 fi
+if [ "$RC" -eq 0 ] \
+  && printf '%s\n' "$OUT" | grep -q "patch test/smoke-fake-1 has merge conflicts" \
+  && printf '%s\n' "$OUT" | grep -q "patch test/smoke-fake-2 has merge conflicts" \
+  && printf '%s\n' "$OUT" | grep -q "DRY_RUN=1 — stopping before build"; then
+  pass "default mode warns both conflicting branches and continues to DRY_RUN stop"
+else
+  fail "default mode did not warn both branches or continue (rc=$RC): $OUT"
+fi
+
+# Strict mode: fatal exit code 10 with pre-flight error naming both branches
+if OUT=$(KIMI_PATCH_REPO="$REPO_DIR" KIMI_PATCH_STATE="$TMP_MULTI_REGISTRY" STRICT_UPSTREAM_MERGE=1 DRY_RUN=1 bash "$PIPELINE" 2>&1); then
+  RC=0
+else
+  RC=$?
+fi
+if [ "$RC" -eq 10 ] \
+  && printf '%s\n' "$OUT" | grep -q "ERROR\[pre-flight\]" \
+  && printf '%s\n' "$OUT" | grep -q "patch test/smoke-fake-1 has merge conflicts" \
+  && printf '%s\n' "$OUT" | grep -q "patch test/smoke-fake-2 has merge conflicts"; then
+  pass "strict mode exits 10 with pre-flight error reporting both branches"
+else
+  fail "strict mode did not exit 10 or report both branches (rc=$RC): $OUT"
+fi
+
 # The fixtures never leave this machine, so they must still resolve locally.
 if printf '%s\n' "$OUT" | grep -q "patch test/smoke-fake-1: using test/smoke-fake-1"; then
   pass "local-only branch resolves to the local ref"

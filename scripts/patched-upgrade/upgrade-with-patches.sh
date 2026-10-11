@@ -15,27 +15,35 @@
 # the sourcing back to the local branches and skips the fetch (development).
 #
 # Invoked by the local `kimi upgrade` delegation hook (target version as $1),
-# or run directly. Before building, the pipeline syncs the local main branch
-# to upstream/main (fast-forward only) and gates on a merge-conflict check:
-# every active patch branch must merge cleanly into upstream/main (simulated
-# with git merge-tree — the branches themselves are never modified), so a
-# patch that can no longer land upstream stops the build instead of being
-# baked into the binary. The check collects every non-tolerated conflict and
-# reports all offending branches in one run, so a broken upgrade names the
-# full fix list instead of dying on the first hit. A self-check at startup
-# compares the live hook script and companion skill against their versioned
-# source on local/upgrade-hook (warn by default; KIMI_UPGRADE_STRICT_SELFCHECK=1
-# makes a live-script drift fatal — the skill only ever warns). Idempotent:
-# exits without rebuilding when the recorded state already matches the target
-# release AND the patch fingerprint (active branches + their head commits) — a
-# new or updated patch forces a rebuild even when the release is unchanged.
+# or run directly. Each phase prints a `---- <label> ----` banner so the last
+# banner printed identifies the failing phase. Before building, the pipeline
+# syncs the local main branch to upstream/main (fast-forward only) and checks
+# active patch branches for merge conflicts vs upstream/main (simulated with
+# git merge-tree — the branches themselves are never modified). This scan
+# answers "can this patch still land upstream?", which is not the same
+# question as "will it apply to the release I am building" (the build baseline
+# is the release tag, normally older than upstream/main); it therefore reports
+# and continues by default, and STRICT_UPSTREAM_MERGE=1 restores the hard gate.
+# The check collects every non-tolerated conflict and reports all offending
+# branches in one run, so a broken upgrade names the full fix list instead of
+# dying on the first hit. A self-check at startup compares the live hook script
+# and companion skill against their versioned source on local/upgrade-hook (warn
+# by default; KIMI_UPGRADE_STRICT_SELFCHECK=1 makes a live-script drift fatal
+# — the skill only ever warns). Idempotent: exits without rebuilding when the
+# recorded state already matches the target release AND the patch fingerprint
+# (active branches + their head commits) — a new or updated patch forces a
+# rebuild even when the release is unchanged.
 #
 # Conflict policy: conflicts confined to generated docs manifests
 # (docs/state-manifest.d.ts — it embeds compiler-internal unique-symbol ids
 # that drift on every regeneration) are tolerated in the merge check and
-# auto-resolved during cherry-pick by taking the patch side. ANY other
-# conflict — in the merge check or during cherry-pick — fails fast, stops
-# the build, and leaves the installed binary untouched.
+# auto-resolved during cherry-pick by taking the patch side. In the merge check,
+# non-tolerated conflicts warn and continue by default (or fail fast under
+# STRICT_UPSTREAM_MERGE=1). During cherry-pick, non-tolerated conflicts fail
+# fast, stop the build, and leave the installed binary untouched.
+#
+# Exit codes: 1 general failure, 10 pre-flight merge gate (strict), 11 patch
+# application onto the release tag.
 #
 # The merge check is text-only; before the heavy build the script type-checks
 # every package the patches touched (tsc --noEmit per package tsconfig), so a
@@ -49,6 +57,7 @@
 #   DRY_RUN=1         stop before the build step, print the plan only
 #   FORCE=1           rebuild even when state matches the target release
 #   SKIP_TYPECHECK=1  skip the pre-build type-check gate
+#   STRICT_UPSTREAM_MERGE=1  treat merge conflicts vs upstream/main as a fatal gate
 #   KIMI_PATCH_LOCAL=1  source patch branches from local branches instead of
 #                       origin, and skip the origin fetch (development/debug)
 set -euo pipefail
@@ -62,9 +71,15 @@ fi
 BIN_DIR="$HOME/.kimi-code/bin"
 UPSTREAM_REPO="MoonshotAI/kimi-code"
 TAG_PREFIX="@moonshot-ai/kimi-code@"
+EXIT_PREFLIGHT=10
+EXIT_APPLY=11
 
 log() { printf '[kimi-patched-upgrade] %s\n' "$*"; }
+warn() { printf '[kimi-patched-upgrade] WARN: %s\n' "$*" >&2; }
+stage() { printf '\n[kimi-patched-upgrade] ---- %s ----\n' "$*"; }
 die() { printf '[kimi-patched-upgrade] ERROR: %s\n' "$*" >&2; exit 1; }
+die_preflight() { printf '[kimi-patched-upgrade] ERROR[pre-flight]: %s\n' "$*" >&2; exit "$EXIT_PREFLIGHT"; }
+die_apply() { printf '[kimi-patched-upgrade] ERROR[apply]: %s\n' "$*" >&2; exit "$EXIT_APPLY"; }
 
 # Resolve a patch branch to the ref the pipeline reads. Origin is
 # authoritative: a branch that changed on the remote was rebased onto the
@@ -164,7 +179,7 @@ try_manifest_autoresolve() {
   printf '%s\n' "$unmerged" | xargs git add --
 }
 
-[ -d "$REPO/.git" ] || die "repo not found at $REPO (set KIMI_PATCH_REPO or fix .state.repoPath)"
+[ -e "$REPO/.git" ] || die "repo not found at $REPO (set KIMI_PATCH_REPO or fix .state.repoPath)"
 [ -f "$STATE_FILE" ] || die "registry not found at $STATE_FILE"
 command -v gh >/dev/null || die "gh CLI is required"
 command -v jq >/dev/null || die "jq is required"
@@ -190,6 +205,7 @@ cd "$REPO"
 [ -z "$(git status --porcelain --untracked-files=no)" ] || die "repo working tree has uncommitted changes; commit or stash first"
 
 # --- 0a. refresh the patch source ----------------------------------------------
+stage "pre-flight: refresh patch branches from origin"
 # Patch branches are read from origin, and the strictly-behind local branches
 # are then fast-forwarded to it, so the branches an agent inspects afterwards
 # are the ones this run builds from (see the header). Fetching once up front
@@ -211,6 +227,7 @@ restore_ref() { git checkout --quiet "$PREV_REF" 2>/dev/null || true; }
 trap restore_ref EXIT
 
 # --- 0. self-check: live copies vs their versioned source ----------------------
+stage "pre-flight: self-check"
 # The live hook script and companion skill must match the versions committed on
 # the local/upgrade-hook branch (git hash-object vs the blobs on the branch, so
 # the comparison is exact regardless of the branch currently checked out). A
@@ -327,6 +344,7 @@ else
 fi
 
 # --- 1. resolve target version ---------------------------------------------
+stage "resolve target release"
 TARGET_VERSION="${1:-}"
 if [ -z "$TARGET_VERSION" ]; then
   TARGET_VERSION=$(HTTPS_PROXY= HTTP_PROXY= https_proxy= http_proxy= \
@@ -336,6 +354,7 @@ fi
 TAG="${TAG_PREFIX}${TARGET_VERSION}"
 
 # --- 2. sync main and check patch branches for conflicts vs upstream/main ---
+stage "check patch branches against upstream/main"
 git fetch upstream main --quiet
 
 # The local main mirrors upstream main; fast-forward only. A diverged main
@@ -406,9 +425,16 @@ $CONFLICTED")
   CHECKED+=("$BRANCH")
 done
 if [ "${#CONFLICT_BLOCKS[@]}" -ne 0 ]; then
-  die "$(printf '%s\n' "${CONFLICT_BLOCKS[@]}")
+  if [ "${STRICT_UPSTREAM_MERGE:-0}" = "1" ]; then
+    die_preflight "$(printf '%s\n' "${CONFLICT_BLOCKS[@]}")
 
-Resolve each branch (merge or rebase it onto upstream/main yourself), then rerun. Binary untouched."
+Nothing was built: the release tag was not fetched and the installed binary is untouched.
+Resolve each branch (rebase it onto upstream/main), then rerun — or rerun with STRICT_UPSTREAM_MERGE=0 to build anyway."
+  else
+    for b in "${CONFLICT_BLOCKS[@]}"; do warn "$b"; done
+    warn "${#CONFLICT_BLOCKS[@]} patch branch(es) can no longer land upstream as PRs (listed above)."
+    warn "continuing to build anyway: the build baseline is $TAG, not upstream/main, so these patches may still apply cleanly. Rebase them onto upstream/main when convenient (see the resolve-upgrade-conflicts skill); set STRICT_UPSTREAM_MERGE=1 to stop the build instead."
+  fi
 fi
 
 # Fingerprint of the effective patch inputs: the target release plus, for each
@@ -442,6 +468,7 @@ fi
 log "target release: $TARGET_VERSION (current base: ${CURRENT_BASE:-none})"
 
 # --- 3. fetch the release tag and check out a build branch ------------------
+stage "fetch release tag and create the build branch"
 if ! git rev-parse --verify "refs/tags/${TAG}^{commit}" >/dev/null 2>&1; then
   log "fetching tag $TAG"
   git fetch upstream "refs/tags/${TAG}:refs/tags/${TAG}" --quiet
@@ -452,6 +479,7 @@ log "release commit: $RELEASE_COMMIT"
 git checkout --quiet -B local/patched "$RELEASE_COMMIT"
 
 # --- 4. apply patches --------------------------------------------------------
+stage "apply patches onto the release"
 APPLIED=()
 SKIPPED=()
 # Upstream context commits (between the release tag and a patch branch's base)
@@ -503,12 +531,16 @@ for ((i = 0; i < PATCH_COUNT; i++)); do
     fi
     # Anything else is a real conflict: abort and die.
     git cherry-pick --abort >/dev/null 2>&1 || true
-    die "conflict applying $BRANCH onto $TAG — resolve manually, then rerun. Binary untouched."
+    die_apply "conflict applying $BRANCH onto $TAG (commit $(git rev-parse --short "$c"))
+${#APPLIED[@]} patch branch(es) had applied cleanly before this one.
+The build branch was aborted (git cherry-pick --abort); nothing was built and the installed binary is untouched.
+Rebase $BRANCH onto upstream/main, then rerun."
   done
   APPLIED+=("$BRANCH (${#COMMITS[@]} commit(s))")
 done
 
 # --- 5. report / dry run ------------------------------------------------------
+stage "summary"
 if [ "${#APPLIED[@]}" -eq 0 ]; then
   log "patches applied: none"
 else
@@ -522,7 +554,11 @@ else
   for p in "${SKIPPED[@]}"; do log "  - $p"; done
 fi
 if [ "${#CHECKED[@]}" -ne 0 ]; then
-  log "merge-conflict check vs upstream/main passed for ${#CHECKED[@]} patch branch(es)"
+  if [ "${#CONFLICT_BLOCKS[@]}" -eq 0 ]; then
+    log "merge-conflict check vs upstream/main passed for ${#CHECKED[@]} patch branch(es)"
+  else
+    log "merge-conflict check vs upstream/main: ${#CONFLICT_BLOCKS[@]} of ${#CHECKED[@]} branch(es) conflicted (see warnings above) — build continued"
+  fi
 fi
 if [ "${DRY_RUN:-0}" = "1" ]; then
   log "DRY_RUN=1 — stopping before build"
@@ -530,6 +566,7 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
 fi
 
 # --- 6. build -----------------------------------------------------------------
+stage "build and install"
 log "building (this takes a few minutes)"
 pnpm install --quiet
 
