@@ -570,6 +570,8 @@ MCP server 的声明配置写在 `~/.kimi-code/mcp.json` 或项目内 `.kimi-cod
 | `[upgrade].auto_install` | `boolean` | `true` | 是否自动安装新版本 |
 | `[status_line].items` | `string[]` | `[]` | 底部状态栏第一行的内置槽位及顺序：`mode`、`goal`、`model`、`tasks`、`cwd`、`git`、`tips`，未知 id 跳过并告警 |
 | `[status_line].command` | `string` | `""` | 自定义状态栏命令：stdout 首行替换状态栏，stdin 收 JSON 快照；上限 300ms、每秒一次，失败回退内置布局 |
+| `[web].host` | `string` | — | `kimi web` 的绑定地址（单个 IP/主机名；优先级：`--host` 参数 > `KIMI_CODE_HOST` > `web.host` > `127.0.0.1`） |
+| `[web].allowed_hosts` | `string[]` | `[]` | DNS 重绑定检查额外允许的 Host 头（与 `--allowed-host` 及 `KIMI_CODE_ALLOWED_HOSTS` 取并集） |
 
 <details>
 <summary>command 的 stdin 输入</summary>
@@ -600,6 +602,10 @@ auto_install = true
 # [status_line]
 # items = ["mode", "goal", "model", "tasks", "cwd", "git", "tips"]
 # command = "~/.kimi-code/statusline.sh"
+
+# [web]
+# host = "127.0.0.1"
+# allowed_hosts = [".example.test"]
 ```
 
 修改在下次启动时生效，或用 `/reload-tui` 立即生效（只重载 `tui.toml`）；`/reload` 会同时重载 `config.toml` 和 `tui.toml`。

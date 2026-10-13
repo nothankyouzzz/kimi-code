@@ -56,6 +56,21 @@ export const DEFAULT_STATUS_LINE_CONFIG: StatusLineConfig = {
   command: null,
 };
 
+export const WebConfigFileSchema = z.object({
+  host: z.string().optional(),
+  allowed_hosts: z.array(z.string()).optional(),
+});
+
+export const WebConfigSchema = z.object({
+  host: z.string().optional(),
+  allowedHosts: z.array(z.string()),
+});
+export type WebConfig = z.infer<typeof WebConfigSchema>;
+
+export const DEFAULT_WEB_CONFIG: WebConfig = {
+  allowedHosts: [],
+};
+
 export const MarkdownConfigSchema = z.object({
   mermaid: z.enum(['off', 'final']),
 });
@@ -97,6 +112,7 @@ export const TuiConfigFileSchema = z.object({
       mermaid: z.string().optional(),
     })
     .optional(),
+  web: WebConfigFileSchema.optional(),
 });
 
 export const TuiConfigSchema = z.object({
@@ -119,6 +135,9 @@ export const TuiConfigSchema = z.object({
   /** Present in every normalized config; optional only so hand-built test
    * fixtures from before this field existed still typecheck. */
   markdown: MarkdownConfigSchema.optional(),
+  /** Present in every normalized config; optional only so hand-built test
+   * fixtures from before this field existed still typecheck. */
+  web: WebConfigSchema.optional(),
 });
 
 export type TuiConfigFileShape = z.infer<typeof TuiConfigFileSchema>;
@@ -147,6 +166,7 @@ export const DEFAULT_TUI_CONFIG: TuiConfig = TuiConfigSchema.parse({
   upgrade: DEFAULT_UPGRADE_PREFERENCES,
   statusLine: DEFAULT_STATUS_LINE_CONFIG,
   markdown: DEFAULT_MARKDOWN_CONFIG,
+  web: DEFAULT_WEB_CONFIG,
 });
 
 /**
@@ -292,6 +312,10 @@ export function normalizeTuiConfig(
     markdown: {
       mermaid: mermaidMode,
     },
+    web: {
+      host: config.web?.host?.trim() === '' ? undefined : config.web?.host?.trim(),
+      allowedHosts: config.web?.allowed_hosts ?? DEFAULT_WEB_CONFIG.allowedHosts,
+    },
   });
 }
 
@@ -310,6 +334,25 @@ export function renderTuiConfig(config: TuiConfig): string {
   if (statusCommand) {
     statusLines.push(`command = "${escapeTomlBasicString(statusCommand)}"`);
   }
+  const webHost = config.web?.host;
+  const webAllowedHosts = config.web?.allowedHosts;
+  const webLines: string[] = [];
+  if (webHost !== undefined) {
+    webLines.push(`host = "${escapeTomlBasicString(webHost)}"`);
+  }
+  if (webAllowedHosts !== undefined && webAllowedHosts.length > 0) {
+    webLines.push(`allowed_hosts = ${JSON.stringify(webAllowedHosts)}`);
+  }
+  const webSection =
+    webLines.length > 0
+      ? `[web]\n${webLines.join('\n')}\n`
+      : `# [web]
+# Bind address for "kimi web" (default: 127.0.0.1; "0.0.0.0" binds all interfaces).
+# host = "127.0.0.1"
+# Extra Host header values allowed through the DNS-rebinding check.
+# Leading dot matches domain suffixes (e.g. ".example.test").
+# allowed_hosts = [".example.test"]
+`;
   const tuiModeLine = `tui_mode = "${config.tuiMode ?? 'regular'}" # "regular" | "fullscreen" ("fullscreen" is experimental)`;
   const markdownSection =
     config.markdown?.mermaid === 'off'
@@ -350,7 +393,8 @@ notification_condition = "${config.notifications.condition}" # "unfocused" | "al
 auto_install = ${String(config.upgrade.autoInstall)} # true | false
 
 ${markdownSection}
-${statusSection}`;
+${statusSection}
+${webSection}`;
 }
 
 function escapeTomlBasicString(value: string): string {

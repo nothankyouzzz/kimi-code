@@ -23,8 +23,14 @@ import type {
   RemoteControlCloseReason,
   RemoteControlStatus,
 } from '#/cli/sub/web/remote-control';
-import type { WebCommandDeps } from '#/cli/sub/web/run';
-import type { ParsedServerOptions } from '#/cli/sub/web/shared';
+import { loadTuiConfigSafely, type WebCommandDeps } from '#/cli/sub/web/run';
+import {
+  resolveAllowedHosts,
+  resolveHost,
+  resolveServerOptions,
+  type ParsedServerOptions,
+} from '#/cli/sub/web/shared';
+import { DEFAULT_TUI_CONFIG, TuiConfigParseError } from '#/tui/config';
 import { darkColors } from '#/tui/theme/colors';
 
 vi.mock('node:child_process', async (importOriginal) => {
@@ -562,6 +568,56 @@ describe('`kimi web` opens the browser', () => {
     }
   });
 
+  it('forces loopback when remote control is requested with a non-loopback [web].host in config', async () => {
+    const { handleWebCommand } = await import('#/cli/sub/web/run');
+    let capturedOptions: ParsedServerOptions | undefined;
+    const startServerForeground = vi.fn(async (options: ParsedServerOptions) => {
+      capturedOptions = options;
+      return undefined as never;
+    });
+    const { stdout, stderr } = makeIo();
+
+    await handleWebCommand(
+      { remoteControl: true, open: false },
+      {
+        startServerForeground,
+        openUrl: vi.fn(),
+        loadConfig: async () => ({
+          ...DEFAULT_TUI_CONFIG,
+          web: { host: '100.91.250.65', allowedHosts: ['.custom.test'] },
+        }),
+        stdout,
+        stderr,
+      },
+    );
+
+    expect(capturedOptions?.host).toBe('127.0.0.1');
+    expect(capturedOptions?.allowedHosts).toEqual(['.custom.test']);
+  });
+
+  it('forces loopback when remote control is requested with a non-loopback KIMI_CODE_HOST', async () => {
+    const { handleWebCommand } = await import('#/cli/sub/web/run');
+    let capturedOptions: ParsedServerOptions | undefined;
+    const startServerForeground = vi.fn(async (options: ParsedServerOptions) => {
+      capturedOptions = options;
+      return undefined as never;
+    });
+    const { stdout, stderr } = makeIo();
+
+    await handleWebCommand(
+      { remoteControl: true, open: false },
+      {
+        startServerForeground,
+        openUrl: vi.fn(),
+        env: { KIMI_CODE_HOST: '100.91.250.65' },
+        stdout,
+        stderr,
+      },
+    );
+
+    expect(capturedOptions?.host).toBe('127.0.0.1');
+  });
+
   it('shows --remote-control in help', () => {
     const remoteControlOption = makeProgram()
       .commands.find((command) => command.name() === 'web')!
@@ -774,6 +830,206 @@ describe('shared parsers stay strict', () => {
     expect(() => parseLogLevel('shout')).toThrow(/invalid --log-level/);
     expect(parseLogLevel(undefined)).toBe('info');
     expect(parseLogLevel('debug')).toBe('debug');
+  });
+});
+
+describe('web access config resolution', () => {
+  describe('resolveHost precedence matrix', () => {
+    it('CLI flag with value beats env, config, and default', () => {
+      expect(resolveHost('127.0.0.3', '10.0.0.1', '192.168.1.1')).toBe('127.0.0.3');
+    });
+
+    it('bare --host (true) beats env, config, and default and binds 0.0.0.0', () => {
+      expect(resolveHost(true, '10.0.0.1', '192.168.1.1')).toBe('0.0.0.0');
+    });
+
+    it('bare --host ("") beats env, config, and default and binds 0.0.0.0', () => {
+      expect(resolveHost('', '10.0.0.1', '192.168.1.1')).toBe('0.0.0.0');
+    });
+
+    it('KIMI_CODE_HOST beats config and default when CLI flag is omitted', () => {
+      expect(resolveHost(undefined, '10.0.0.1', '192.168.1.1')).toBe('10.0.0.1');
+    });
+
+    it('config [web].host beats default when CLI flag and env are omitted', () => {
+      expect(resolveHost(undefined, undefined, '192.168.1.1')).toBe('192.168.1.1');
+    });
+
+    it('falls back to 127.0.0.1 when CLI flag, env, and config are all omitted', () => {
+      expect(resolveHost(undefined, undefined, undefined)).toBe('127.0.0.1');
+    });
+
+    it('ignores empty or whitespace env and falls back to config', () => {
+      expect(resolveHost(undefined, '   ', '192.168.1.1')).toBe('192.168.1.1');
+    });
+
+    it('ignores empty or whitespace config and falls back to default', () => {
+      expect(resolveHost(undefined, '   ', '   ')).toBe('127.0.0.1');
+    });
+  });
+
+  describe('resolveAllowedHosts union behavior', () => {
+    it('unions CLI allowed hosts and config allowed hosts and deduplicates', () => {
+      expect(
+        resolveAllowedHosts(['.example.com', 'foo.test'], ['foo.test', 'bar.test']),
+      ).toEqual(['.example.com', 'foo.test', 'bar.test']);
+    });
+
+    it('splits comma-separated entries in both sources', () => {
+      expect(
+        resolveAllowedHosts(['a.com, b.com'], ['b.com, c.com']),
+      ).toEqual(['a.com', 'b.com', 'c.com']);
+    });
+
+    it('uses config entries when CLI option is omitted', () => {
+      expect(resolveAllowedHosts(undefined, ['.internal.test'])).toEqual(['.internal.test']);
+    });
+
+    it('uses CLI entries when config is omitted or empty', () => {
+      expect(resolveAllowedHosts(['.cli.test'], undefined)).toEqual(['.cli.test']);
+      expect(resolveAllowedHosts(['.cli.test'], [])).toEqual(['.cli.test']);
+    });
+
+    it('returns empty array when both sources are omitted', () => {
+      expect(resolveAllowedHosts(undefined, undefined)).toEqual([]);
+    });
+  });
+
+  describe('resolveServerOptions integration', () => {
+    it('resolves options using CLI flag > env > config > default', () => {
+      const config = {
+        ...DEFAULT_TUI_CONFIG,
+        web: { host: '192.168.1.10', allowedHosts: ['.from-config.test'] },
+      };
+
+      // 1. Config only
+      const resConfigOnly = resolveServerOptions({}, config, {});
+      expect(resConfigOnly.host).toBe('192.168.1.10');
+      expect(resConfigOnly.allowedHosts).toEqual(['.from-config.test']);
+
+      // 2. Env beats config
+      const resEnv = resolveServerOptions({}, config, { KIMI_CODE_HOST: '10.0.0.5' });
+      expect(resEnv.host).toBe('10.0.0.5');
+
+      // 3. Flag beats env and config
+      const resFlag = resolveServerOptions(
+        { host: '127.0.0.9' },
+        config,
+        { KIMI_CODE_HOST: '10.0.0.5' },
+      );
+      expect(resFlag.host).toBe('127.0.0.9');
+
+      // 4. Allowed hosts are unioned
+      const resUnion = resolveServerOptions(
+        { allowedHost: ['.from-cli.test'] },
+        config,
+        {},
+      );
+      expect(resUnion.allowedHosts).toEqual(['.from-cli.test', '.from-config.test']);
+    });
+  });
+
+  describe('handleWebCommand integration and resilience', () => {
+    it('reads host and allowed_hosts from config when options are omitted', async () => {
+      const { handleWebCommand } = await import('#/cli/sub/web/run');
+      const { runner, calls } = makeRunner();
+      const { stdout, stderr } = makeIo();
+
+      await handleWebCommand(
+        { port: '58627', open: false },
+        {
+          startServerForeground: runner,
+          openUrl: vi.fn(),
+          loadConfig: async () => ({
+            ...DEFAULT_TUI_CONFIG,
+            web: { host: '127.0.0.2', allowedHosts: ['.test.local'] },
+          }),
+          stdout,
+          stderr,
+        },
+      );
+
+      expect(calls.options?.host).toBe('127.0.0.2');
+      expect(calls.options?.allowedHosts).toEqual(['.test.local']);
+    });
+
+    it('allows CLI options to override host and union allowed_hosts with config', async () => {
+      const { handleWebCommand } = await import('#/cli/sub/web/run');
+      const { runner, calls } = makeRunner();
+      const { stdout, stderr } = makeIo();
+
+      await handleWebCommand(
+        {
+          port: '58627',
+          host: '127.0.0.3',
+          allowedHost: ['.cli.local'],
+          open: false,
+        },
+        {
+          startServerForeground: runner,
+          openUrl: vi.fn(),
+          loadConfig: async () => ({
+            ...DEFAULT_TUI_CONFIG,
+            web: { host: '127.0.0.2', allowedHosts: ['.config.local'] },
+          }),
+          stdout,
+          stderr,
+        },
+      );
+
+      expect(calls.options?.host).toBe('127.0.0.3');
+      expect(calls.options?.allowedHosts).toEqual(['.cli.local', '.config.local']);
+    });
+
+    it('degrades to defaults when loadConfig throws TuiConfigParseError', async () => {
+      const { handleWebCommand } = await import('#/cli/sub/web/run');
+      const { runner, calls } = makeRunner();
+      const { stdout, stderr } = makeIo();
+
+      await handleWebCommand(
+        { port: '58627', open: false },
+        {
+          startServerForeground: runner,
+          openUrl: vi.fn(),
+          loadConfig: async () => {
+            throw new TuiConfigParseError(DEFAULT_TUI_CONFIG);
+          },
+          stdout,
+          stderr,
+        },
+      );
+
+      expect(calls.options?.host).toBe('127.0.0.1');
+      expect(calls.options?.allowedHosts).toEqual([]);
+    });
+
+    it('degrades to defaults when loadConfig throws arbitrary Error', async () => {
+      const { handleWebCommand } = await import('#/cli/sub/web/run');
+      const { runner, calls } = makeRunner();
+      const { stdout, stderr } = makeIo();
+
+      await handleWebCommand(
+        { port: '58627', open: false },
+        {
+          startServerForeground: runner,
+          openUrl: vi.fn(),
+          loadConfig: async () => {
+            throw new Error('EACCES: permission denied');
+          },
+          stdout,
+          stderr,
+        },
+      );
+
+      expect(calls.options?.host).toBe('127.0.0.1');
+      expect(calls.options?.allowedHosts).toEqual([]);
+    });
+
+    it('loadTuiConfigSafely recovers fallback config on parse error', async () => {
+      const fallback = await loadTuiConfigSafely();
+      expect(fallback).toBeDefined();
+      expect(fallback.web).toEqual(DEFAULT_TUI_CONFIG.web);
+    });
   });
 });
 

@@ -9,6 +9,8 @@ import { join } from 'node:path';
 
 import type { ServerLogLevel } from '@moonshot-ai/kap-server';
 
+import type { TuiConfig } from '#/tui/config';
+
 export const LOCAL_SERVER_HOST = '127.0.0.1';
 export const DEFAULT_LAN_HOST = '0.0.0.0';
 export const DEFAULT_SERVER_HOST = LOCAL_SERVER_HOST;
@@ -65,16 +67,49 @@ export interface ServerCliOptions {
   webTitle?: string;
 }
 
-export function parseServerOptions(opts: ServerCliOptions): ParsedServerOptions {
+export function resolveHost(
+  cliHost: string | boolean | undefined,
+  envHost: string | undefined,
+  configHost: string | undefined,
+): string {
+  if (cliHost !== undefined && cliHost !== false) {
+    if (cliHost === true || cliHost === '') return DEFAULT_LAN_HOST;
+    return cliHost;
+  }
+  const envTrimmed = envHost?.trim();
+  if (envTrimmed !== undefined && envTrimmed.length > 0) {
+    return envTrimmed;
+  }
+  const configTrimmed = configHost?.trim();
+  if (configTrimmed !== undefined && configTrimmed.length > 0) {
+    return configTrimmed;
+  }
+  return DEFAULT_SERVER_HOST;
+}
+
+export function resolveAllowedHosts(
+  cliAllowedHosts: readonly string[] | undefined,
+  configAllowedHosts: readonly string[] | undefined,
+): string[] {
+  const fromCli = parseAllowedHostArgs(cliAllowedHosts);
+  const fromConfig = parseAllowedHostArgs(configAllowedHosts);
+  return [...new Set([...fromCli, ...fromConfig])];
+}
+
+export function resolveServerOptions(
+  opts: ServerCliOptions,
+  config?: TuiConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): ParsedServerOptions {
   return {
-    host: parseHost(opts.host),
+    host: resolveHost(opts.host, env['KIMI_CODE_HOST'], config?.web?.host),
     port: parsePort(opts.port, '--port', DEFAULT_SERVER_PORT),
     logLevel: parseLogLevel(opts.logLevel ?? DEFAULT_FOREGROUND_LOG_LEVEL),
     debugEndpoints: opts.debugEndpoints === true,
     insecureNoTls: opts.insecureNoTls !== false,
     allowRemoteShutdown: opts.allowRemoteShutdown === true,
     dangerousBypassAuth: opts.dangerousBypassAuth === true,
-    allowedHosts: parseAllowedHostArgs(opts.allowedHost),
+    allowedHosts: resolveAllowedHosts(opts.allowedHost, config?.web?.allowedHosts),
     webTitle: opts.webTitle,
   };
 }
@@ -85,12 +120,6 @@ export function parseAllowedHostArgs(raw: readonly string[] | undefined): string
     .flatMap((entry) => entry.split(','))
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
-}
-
-function parseHost(raw: string | boolean | undefined): string {
-  if (raw === undefined || raw === false) return DEFAULT_SERVER_HOST;
-  if (raw === true || raw === '') return DEFAULT_LAN_HOST;
-  return raw;
 }
 
 export function parsePort(raw: string | undefined, label: string, fallback: number): number {

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   DEFAULT_TUI_CONFIG,
+  DEFAULT_WEB_CONFIG,
   INVALID_TUI_CONFIG_MESSAGE,
   loadTuiConfig,
   parseTuiConfig,
@@ -73,6 +74,7 @@ auto_install = false
       upgrade: { autoInstall: false },
       statusLine: { items: null, command: null },
       markdown: { mermaid: 'final' },
+      web: { host: undefined, allowedHosts: [] },
     });
   });
 
@@ -132,6 +134,7 @@ command = "   "
       upgrade: { autoInstall: true },
       statusLine: { items: null, command: null },
       markdown: { mermaid: 'final' },
+      web: { host: undefined, allowedHosts: [] },
     });
   });
 
@@ -182,6 +185,7 @@ command = "   "
       upgrade: { autoInstall: false },
       statusLine: { items: null, command: null },
       markdown: { mermaid: 'final' },
+      web: { host: undefined, allowedHosts: [] },
     });
   });
 
@@ -463,5 +467,108 @@ describe('TUI config tui_mode env migration', () => {
 
     expect(config.tuiMode).toBe('regular');
     expect(readFileSync(filePath, 'utf-8')).toContain('\ntui_mode = "regular"');
+  });
+});
+
+describe('TUI config web', () => {
+  it('defaults to empty allowedHosts and undefined host when the section is omitted', () => {
+    const config = parseTuiConfig(`theme = "dark"`);
+    expect(config.web).toEqual(DEFAULT_WEB_CONFIG);
+    expect(config.web?.host).toBeUndefined();
+    expect(config.web?.allowedHosts).toEqual([]);
+  });
+
+  it('parses valid [web] section with host and allowed_hosts', () => {
+    const config = parseTuiConfig(`
+[web]
+host = "100.91.250.65"
+allowed_hosts = [".example.test", "dev.local"]
+`);
+
+    expect(config.web).toEqual({
+      host: '100.91.250.65',
+      allowedHosts: ['.example.test', 'dev.local'],
+    });
+  });
+
+  it('parses host = "0.0.0.0"', () => {
+    const config = parseTuiConfig(`
+[web]
+host = "0.0.0.0"
+`);
+
+    expect(config.web?.host).toBe('0.0.0.0');
+    expect(config.web?.allowedHosts).toEqual([]);
+  });
+
+  it('normalizes empty or whitespace host to undefined', () => {
+    const config = parseTuiConfig(`
+[web]
+host = "   "
+`);
+
+    expect(config.web?.host).toBeUndefined();
+  });
+
+  it('documents web in the rendered template as a commented guide by default', async () => {
+    await saveTuiConfig(DEFAULT_TUI_CONFIG, filePath);
+
+    const text = readFileSync(filePath, 'utf-8');
+    expect(text).toContain('# [web]');
+    expect(text).toContain('# host = "127.0.0.1"');
+    expect(text).toContain('# allowed_hosts = [".example.test"]');
+    expect(text).not.toContain('\n[web]\n');
+  });
+
+  it('preserves an active host across save and reload', async () => {
+    await saveTuiConfig(
+      { ...DEFAULT_TUI_CONFIG, web: { host: '100.91.250.65', allowedHosts: [] } },
+      filePath,
+    );
+
+    const text = readFileSync(filePath, 'utf-8');
+    expect(text).toContain('\n[web]\n');
+    expect(text).toContain('host = "100.91.250.65"');
+    const reloaded = await loadTuiConfig(filePath);
+    expect(reloaded.web).toEqual({
+      host: '100.91.250.65',
+      allowedHosts: [],
+    });
+  });
+
+  it('preserves active allowed_hosts across save and reload', async () => {
+    await saveTuiConfig(
+      { ...DEFAULT_TUI_CONFIG, web: { host: undefined, allowedHosts: ['.example.test'] } },
+      filePath,
+    );
+
+    const text = readFileSync(filePath, 'utf-8');
+    expect(text).toContain('\n[web]\n');
+    expect(text).toContain('allowed_hosts = [".example.test"]');
+    const reloaded = await loadTuiConfig(filePath);
+    expect(reloaded.web).toEqual({
+      host: undefined,
+      allowedHosts: ['.example.test'],
+    });
+  });
+
+  it('preserves both host and allowed_hosts across save and reload', async () => {
+    await saveTuiConfig(
+      {
+        ...DEFAULT_TUI_CONFIG,
+        web: { host: '192.168.1.5', allowedHosts: ['.example.test', 'host.test'] },
+      },
+      filePath,
+    );
+
+    const text = readFileSync(filePath, 'utf-8');
+    expect(text).toContain('\n[web]\n');
+    expect(text).toContain('host = "192.168.1.5"');
+    expect(text).toContain('allowed_hosts = [".example.test","host.test"]');
+    const reloaded = await loadTuiConfig(filePath);
+    expect(reloaded.web).toEqual({
+      host: '192.168.1.5',
+      allowedHosts: ['.example.test', 'host.test'],
+    });
   });
 });

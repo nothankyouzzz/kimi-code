@@ -9,6 +9,7 @@ import {
   handleWebCommand,
   webSessionUrl,
 } from '#/tui/commands/web';
+import { DEFAULT_TUI_CONFIG } from '#/tui/config';
 import { renderTerminalQr } from '#/utils/remote-control-qr';
 
 const mocks = vi.hoisted(() => ({
@@ -17,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   tryResolveServerToken: vi.fn(),
   getDataDir: vi.fn(() => '/tmp/kimi-home'),
   openUrl: vi.fn(),
+  loadTuiConfigSafely: vi.fn(),
 }));
 
 vi.mock('#/cli/sub/web/remote-control', async (importOriginal) => {
@@ -26,7 +28,11 @@ vi.mock('#/cli/sub/web/remote-control', async (importOriginal) => {
 
 vi.mock('#/cli/sub/web/run', async (importOriginal) => {
   const actual = await importOriginal<typeof import('#/cli/sub/web/run')>();
-  return { ...actual, startServerForeground: mocks.startServerForeground };
+  return {
+    ...actual,
+    startServerForeground: mocks.startServerForeground,
+    loadTuiConfigSafely: mocks.loadTuiConfigSafely,
+  };
 });
 
 vi.mock('#/cli/sub/web/shared', async (importOriginal) => {
@@ -93,6 +99,7 @@ describe('handleWebCommand', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getDataDir.mockReturnValue('/tmp/kimi-home');
+    mocks.loadTuiConfigSafely.mockResolvedValue(DEFAULT_TUI_CONFIG);
   });
 
   it('shows an error and does nothing when there is no active session', async () => {
@@ -142,6 +149,33 @@ describe('handleWebCommand', () => {
     expect(written).toContain('Ctrl+C');
     expect(written).toContain('/sessions/ses-1');
     writeSpy.mockRestore();
+  });
+
+  it('passes the host resolved from config to startServerForeground', async () => {
+    mocks.loadTuiConfigSafely.mockResolvedValue({
+      ...DEFAULT_TUI_CONFIG,
+      web: { host: '100.91.250.65', allowedHosts: ['.custom.test'] },
+    });
+    mocks.startServerForeground.mockImplementation(
+      async (_options: unknown, hooks: { onReady?: (origin: string) => void }) => {
+        hooks.onReady?.('http://100.91.250.65:58627');
+      },
+    );
+    const host = makeHost();
+
+    await handleWebCommand(host);
+    const task = host.setExitForegroundTask.mock.calls[0]![0] as (
+      exitCode: number,
+    ) => Promise<void>;
+    await task(0);
+
+    expect(mocks.startServerForeground).toHaveBeenCalledWith(
+      expect.objectContaining({
+        host: '100.91.250.65',
+        allowedHosts: ['.custom.test'],
+      }),
+      expect.anything(),
+    );
   });
 });
 
@@ -318,6 +352,44 @@ describe('handleRemoteControlCommand', () => {
       writeSpy.mockRestore();
       rmSync(tempRoot, { recursive: true, force: true });
     }
+  });
+
+  it('passes a loopback host even when [web].host is set to a non-loopback address', async () => {
+    vi.clearAllMocks();
+    mocks.loadTuiConfigSafely.mockResolvedValue({
+      ...DEFAULT_TUI_CONFIG,
+      web: { host: '192.168.1.100', allowedHosts: ['.custom.test'] },
+    });
+    mocks.getDataDir.mockReturnValue('/tmp/kimi-home');
+    mocks.tryResolveServerToken.mockReturnValue('local-server-token');
+    const close = vi.fn(async () => {});
+    mocks.startRemoteControl.mockResolvedValue({
+      deviceId: 'device-1',
+      deviceName: 'example-device',
+      url: 'https://code-rc.kimi.com/devices/device-1/?rc=1',
+      relayOrigin: 'https://code-rc.kimi.com',
+      closed: new Promise(() => {}),
+      close,
+    });
+    mocks.startServerForeground.mockImplementation(
+      async (_options: unknown, hooks: { onReady?: (origin: string) => void | Promise<void> }) => {
+        await hooks.onReady?.('http://127.0.0.1:58627');
+      },
+    );
+    const host = makeHost();
+
+    await handleRemoteControlCommand(host);
+    const task = host.setExitForegroundTask.mock.calls[0]![0] as () => Promise<void>;
+    await task();
+
+    expect(mocks.startServerForeground).toHaveBeenCalledWith(
+      expect.objectContaining({
+        host: '127.0.0.1',
+        allowedHosts: ['.custom.test'],
+      }),
+      expect.anything(),
+    );
+    expect(close).not.toHaveBeenCalled();
   });
 });
 

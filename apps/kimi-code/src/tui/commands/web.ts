@@ -11,8 +11,8 @@ import {
   startRemoteControl,
   type RemoteControlStatus,
 } from '#/cli/sub/web/remote-control';
-import { formatReadyBanner, startServerForeground } from '#/cli/sub/web/run';
-import { parseServerOptions, tryResolveServerToken } from '#/cli/sub/web/shared';
+import { formatReadyBanner, loadTuiConfigSafely, startServerForeground } from '#/cli/sub/web/run';
+import { LOCAL_SERVER_HOST, resolveServerOptions, tryResolveServerToken } from '#/cli/sub/web/shared';
 import { openUrl } from '#/utils/open-url';
 import { getDataDir } from '#/utils/paths';
 import { persistedKimiOAuthRef } from '#/utils/region';
@@ -53,7 +53,10 @@ export async function handleRemoteControlCommand(host: SlashCommandHost): Promis
   }
 
   host.setExitForegroundTask(async () => {
-    const options = parseServerOptions({});
+    // Remote Control requires a loopback bind, so force loopback regardless of
+    // any [web].host preference while still inheriting configured allowed_hosts.
+    const config = await loadTuiConfigSafely();
+    const options = resolveServerOptions({ host: LOCAL_SERVER_HOST }, config);
     let remoteControl: Awaited<ReturnType<typeof startRemoteControl>> | undefined;
     try {
       await startServerForeground(options, {
@@ -132,7 +135,8 @@ export async function handleRemoteControlCommand(host: SlashCommandHost): Promis
  */
 function startNewServerAfterExit(host: SlashCommandHost, sessionId: string): void {
   host.setExitForegroundTask(async () => {
-    const options = parseServerOptions({});
+    const config = await loadTuiConfigSafely();
+    const options = resolveServerOptions({}, config);
     try {
       await startServerForeground(options, {
         onReady: (origin) => {

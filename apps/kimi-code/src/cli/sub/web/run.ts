@@ -18,6 +18,7 @@ import { type Command, Option } from 'commander';
 
 import { CLI_SHUTDOWN_TIMEOUT_MS, WEB_USER_AGENT_SUFFIX } from '#/constant/app';
 import { getNativeWebAssetsDir } from '#/native/web-assets';
+import { DEFAULT_TUI_CONFIG, loadTuiConfig, TuiConfigParseError, type TuiConfig } from '#/tui/config';
 import { darkColors } from '#/tui/theme/colors';
 import { openUrl as defaultOpenUrl } from '#/utils/open-url';
 import { getDataDir } from '#/utils/paths';
@@ -51,7 +52,8 @@ import {
   DEFAULT_LAN_HOST,
   DEFAULT_SERVER_HOST,
   DEFAULT_SERVER_PORT,
-  parseServerOptions,
+  LOCAL_SERVER_HOST,
+  resolveServerOptions,
   tryResolveServerToken,
   VALID_LOG_LEVELS,
   type ParsedServerOptions,
@@ -102,6 +104,8 @@ export interface WebCommandDeps {
    * it simply print/open the plain origin.
    */
   resolveToken?: () => string | undefined;
+  loadConfig?: () => Promise<TuiConfig>;
+  env?: NodeJS.ProcessEnv;
   /**
    * Non-loopback interface addresses to display for a wildcard bind. Defaults
    * to the machine's own interfaces (`listNetworkAddresses()`); inject a fixed
@@ -137,11 +141,11 @@ export function buildWebCommand(
     )
     .option(
       '--host [host]',
-      `Bind host. Omit to bind ${DEFAULT_SERVER_HOST} (this machine only); pass --host to bind ${DEFAULT_LAN_HOST} (all interfaces), or --host <host> for a specific host. The bearer token is printed at startup.`,
+      `Bind host. Omit to bind ${DEFAULT_SERVER_HOST} (this machine only); pass --host to bind ${DEFAULT_LAN_HOST} (all interfaces), or --host <host> for a specific host. Can also be set via KIMI_CODE_HOST or tui.toml [web].host. The bearer token is printed at startup.`,
     )
     .option(
       '--allowed-host <host...>',
-      'Extra Host header value to allow through the DNS-rebinding check. Repeat or comma-separate; a leading dot matches a domain suffix (e.g. .example.com).',
+      'Extra Host header value to allow through the DNS-rebinding check. Repeat or comma-separate; a leading dot matches a domain suffix (e.g. .example.com). Can also be set via KIMI_CODE_ALLOWED_HOSTS or tui.toml [web].allowed_hosts.',
     )
     .option(
       '--insecure-no-tls',
@@ -193,11 +197,41 @@ export function buildWebCommand(
     });
 }
 
+export async function loadTuiConfigSafely(): Promise<TuiConfig> {
+  try {
+    return await loadTuiConfig();
+  } catch (error) {
+    if (error instanceof TuiConfigParseError) {
+      return error.fallback;
+    }
+    return DEFAULT_TUI_CONFIG;
+  }
+}
+
 export async function handleWebCommand(
   opts: WebCliOptions,
   deps: WebCommandDeps = DEFAULT_WEB_COMMAND_DEPS,
 ): Promise<void> {
-  const parsed = parseServerOptions(opts);
+  let config: TuiConfig;
+  try {
+    const loadConfig = deps.loadConfig ?? loadTuiConfigSafely;
+    config = await loadConfig();
+  } catch (error) {
+    if (error instanceof TuiConfigParseError) {
+      config = error.fallback;
+    } else {
+      config = DEFAULT_TUI_CONFIG;
+    }
+  }
+  const hasExplicitCliHost = opts.host !== undefined && opts.host !== false;
+  // Remote Control requires loopback: an explicit non-loopback CLI flag stays an
+  // error, but an environmental host (KIMI_CODE_HOST or tui.toml [web].host) yields
+  // to loopback so Remote Control keeps working without overriding the user's config.
+  const serverOpts =
+    opts.remoteControl === true && !hasExplicitCliHost
+      ? { ...opts, host: LOCAL_SERVER_HOST }
+      : opts;
+  const parsed = resolveServerOptions(serverOpts, config, deps.env ?? process.env);
   if (opts.remoteControl === true && parsed.dangerousBypassAuth) {
     throw new Error('--remote-control cannot be combined with --dangerous-bypass-auth.');
   }
@@ -547,6 +581,7 @@ const DEFAULT_WEB_COMMAND_DEPS: WebCommandDeps = {
     // caller opens the plain origin.
     return tryResolveServerToken(getDataDir());
   },
+  loadConfig: loadTuiConfigSafely,
   stdout: process.stdout,
   stderr: process.stderr,
 };
