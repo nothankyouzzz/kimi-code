@@ -45,6 +45,12 @@
       "pr": null,
       "status": "active",
       "localOnly": true
+    },
+    {
+      "branch": "feat/web-exposure-config",
+      "pr": null,
+      "status": "active",
+      "localOnly": true
     }
   ]
 }
