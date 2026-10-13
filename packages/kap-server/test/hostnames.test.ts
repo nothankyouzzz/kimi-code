@@ -76,6 +76,12 @@ describe('isAllowedHost (boundHost)', () => {
   it('still denies unrelated hosts', () => {
     expect(isAllowedHost('otherhost', { boundHost: 'myhost' })).toBe(false);
   });
+
+  it('allows any host in a boundHost list', () => {
+    expect(isAllowedHost('host-a', { boundHost: ['host-a', 'host-b'] })).toBe(true);
+    expect(isAllowedHost('host-b:8080', { boundHost: ['host-a', 'host-b'] })).toBe(true);
+    expect(isAllowedHost('host-c', { boundHost: ['host-a', 'host-b'] })).toBe(false);
+  });
 });
 
 describe('isAllowedHost (extra)', () => {

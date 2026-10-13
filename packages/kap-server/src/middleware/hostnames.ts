@@ -7,7 +7,7 @@ import { errEnvelope } from '../envelope';
 const HOST_ERROR_CODE = 40301;
 
 export interface HostCheckOptions {
-  readonly boundHost?: string;
+  readonly boundHost?: string | readonly string[];
   readonly extra?: readonly string[];
   readonly disable?: boolean;
 }
@@ -76,8 +76,18 @@ export function isAllowedHost(host: string | undefined, opts: HostCheckOptions):
   if (net.isIP(h) !== 0) {
     return true;
   }
-  if (opts.boundHost !== undefined && h === stripPort(opts.boundHost)) {
-    return true;
+  if (opts.boundHost !== undefined) {
+    if (typeof opts.boundHost === 'string') {
+      if (h === stripPort(opts.boundHost)) {
+        return true;
+      }
+    } else {
+      for (const b of opts.boundHost) {
+        if (h === stripPort(b)) {
+          return true;
+        }
+      }
+    }
   }
   if (opts.extra !== undefined) {
     for (const entry of opts.extra) {

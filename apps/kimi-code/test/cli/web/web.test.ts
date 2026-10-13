@@ -26,7 +26,7 @@ import type {
 import { loadTuiConfigSafely, type WebCommandDeps } from '#/cli/sub/web/run';
 import {
   resolveAllowedHosts,
-  resolveHost,
+  resolveHosts,
   resolveServerOptions,
   type ParsedServerOptions,
 } from '#/cli/sub/web/shared';
@@ -591,7 +591,7 @@ describe('`kimi web` opens the browser', () => {
       },
     );
 
-    expect(capturedOptions?.host).toBe('127.0.0.1');
+    expect(capturedOptions?.hosts).toEqual(['127.0.0.1']);
     expect(capturedOptions?.allowedHosts).toEqual(['.custom.test']);
   });
 
@@ -615,7 +615,7 @@ describe('`kimi web` opens the browser', () => {
       },
     );
 
-    expect(capturedOptions?.host).toBe('127.0.0.1');
+    expect(capturedOptions?.hosts).toEqual(['127.0.0.1']);
   });
 
   it('shows --remote-control in help', () => {
@@ -691,7 +691,7 @@ describe('`kimi web` option threading', () => {
     );
 
     expect(calls.options).toEqual({
-      host: '0.0.0.0',
+      hosts: ['0.0.0.0'],
       port: 59000,
       logLevel: 'silent',
       debugEndpoints: true,
@@ -713,7 +713,7 @@ describe('`kimi web` option threading', () => {
     );
 
     expect(calls.options).toMatchObject({
-      host: '127.0.0.1',
+      hosts: ['127.0.0.1'],
       insecureNoTls: true,
       logLevel: 'silent',
     });
@@ -729,7 +729,7 @@ describe('`kimi web` option threading', () => {
       { startServerForeground: runner, openUrl: vi.fn(), stdout, stderr },
     );
 
-    expect(calls.options).toMatchObject({ host: '0.0.0.0', insecureNoTls: true });
+    expect(calls.options).toMatchObject({ hosts: ['0.0.0.0'], insecureNoTls: true });
   });
 
   it('passes --log-level through to the runner', async () => {
@@ -834,37 +834,49 @@ describe('shared parsers stay strict', () => {
 });
 
 describe('web access config resolution', () => {
-  describe('resolveHost precedence matrix', () => {
+  describe('resolveHosts precedence matrix', () => {
     it('CLI flag with value beats env, config, and default', () => {
-      expect(resolveHost('127.0.0.3', '10.0.0.1', '192.168.1.1')).toBe('127.0.0.3');
+      expect(resolveHosts('127.0.0.3', '10.0.0.1', '192.168.1.1')).toEqual(['127.0.0.3']);
     });
 
-    it('bare --host (true) beats env, config, and default and binds 0.0.0.0', () => {
-      expect(resolveHost(true, '10.0.0.1', '192.168.1.1')).toBe('0.0.0.0');
+    it('CLI flag with multiple hosts beats env, config, and default', () => {
+      expect(
+        resolveHosts(['127.0.0.1', '100.91.250.65'], '10.0.0.1', ['192.168.1.1']),
+      ).toEqual(['127.0.0.1', '100.91.250.65']);
+    });
+
+    it('bare --host (true) in set supersedes and binds 0.0.0.0', () => {
+      expect(resolveHosts(true, '10.0.0.1', '192.168.1.1')).toEqual(['0.0.0.0']);
+      expect(resolveHosts(['127.0.0.1', true], '10.0.0.1', '192.168.1.1')).toEqual(['0.0.0.0']);
     });
 
     it('bare --host ("") beats env, config, and default and binds 0.0.0.0', () => {
-      expect(resolveHost('', '10.0.0.1', '192.168.1.1')).toBe('0.0.0.0');
+      expect(resolveHosts('', '10.0.0.1', '192.168.1.1')).toEqual(['0.0.0.0']);
+    });
+
+    it('0.0.0.0 in a set supersedes other addresses to 0.0.0.0', () => {
+      expect(resolveHosts(['127.0.0.1', '0.0.0.0', '100.91.250.65'], undefined, undefined)).toEqual(['0.0.0.0']);
     });
 
     it('KIMI_CODE_HOST beats config and default when CLI flag is omitted', () => {
-      expect(resolveHost(undefined, '10.0.0.1', '192.168.1.1')).toBe('10.0.0.1');
+      expect(resolveHosts(undefined, '10.0.0.1, 10.0.0.2', '192.168.1.1')).toEqual(['10.0.0.1', '10.0.0.2']);
     });
 
     it('config [web].host beats default when CLI flag and env are omitted', () => {
-      expect(resolveHost(undefined, undefined, '192.168.1.1')).toBe('192.168.1.1');
+      expect(resolveHosts(undefined, undefined, ['192.168.1.1', '100.91.250.65'])).toEqual(['192.168.1.1', '100.91.250.65']);
+      expect(resolveHosts(undefined, undefined, '192.168.1.1')).toEqual(['192.168.1.1']);
     });
 
     it('falls back to 127.0.0.1 when CLI flag, env, and config are all omitted', () => {
-      expect(resolveHost(undefined, undefined, undefined)).toBe('127.0.0.1');
+      expect(resolveHosts(undefined, undefined, undefined)).toEqual(['127.0.0.1']);
     });
 
     it('ignores empty or whitespace env and falls back to config', () => {
-      expect(resolveHost(undefined, '   ', '192.168.1.1')).toBe('192.168.1.1');
+      expect(resolveHosts(undefined, '   ,  ', ['192.168.1.1'])).toEqual(['192.168.1.1']);
     });
 
     it('ignores empty or whitespace config and falls back to default', () => {
-      expect(resolveHost(undefined, '   ', '   ')).toBe('127.0.0.1');
+      expect(resolveHosts(undefined, '   ', ['   ', ''])).toEqual(['127.0.0.1']);
     });
   });
 
@@ -899,25 +911,25 @@ describe('web access config resolution', () => {
     it('resolves options using CLI flag > env > config > default', () => {
       const config = {
         ...DEFAULT_TUI_CONFIG,
-        web: { host: '192.168.1.10', allowedHosts: ['.from-config.test'] },
+        web: { host: ['192.168.1.10', '192.168.1.11'], allowedHosts: ['.from-config.test'] },
       };
 
       // 1. Config only
       const resConfigOnly = resolveServerOptions({}, config, {});
-      expect(resConfigOnly.host).toBe('192.168.1.10');
+      expect(resConfigOnly.hosts).toEqual(['192.168.1.10', '192.168.1.11']);
       expect(resConfigOnly.allowedHosts).toEqual(['.from-config.test']);
 
       // 2. Env beats config
-      const resEnv = resolveServerOptions({}, config, { KIMI_CODE_HOST: '10.0.0.5' });
-      expect(resEnv.host).toBe('10.0.0.5');
+      const resEnv = resolveServerOptions({}, config, { KIMI_CODE_HOST: '10.0.0.5, 10.0.0.6' });
+      expect(resEnv.hosts).toEqual(['10.0.0.5', '10.0.0.6']);
 
       // 3. Flag beats env and config
       const resFlag = resolveServerOptions(
-        { host: '127.0.0.9' },
+        { host: ['127.0.0.9', '127.0.0.10'] },
         config,
         { KIMI_CODE_HOST: '10.0.0.5' },
       );
-      expect(resFlag.host).toBe('127.0.0.9');
+      expect(resFlag.hosts).toEqual(['127.0.0.9', '127.0.0.10']);
 
       // 4. Allowed hosts are unioned
       const resUnion = resolveServerOptions(
@@ -942,14 +954,14 @@ describe('web access config resolution', () => {
           openUrl: vi.fn(),
           loadConfig: async () => ({
             ...DEFAULT_TUI_CONFIG,
-            web: { host: '127.0.0.2', allowedHosts: ['.test.local'] },
+            web: { host: ['127.0.0.2', '127.0.0.3'], allowedHosts: ['.test.local'] },
           }),
           stdout,
           stderr,
         },
       );
 
-      expect(calls.options?.host).toBe('127.0.0.2');
+      expect(calls.options?.hosts).toEqual(['127.0.0.2', '127.0.0.3']);
       expect(calls.options?.allowedHosts).toEqual(['.test.local']);
     });
 
@@ -961,7 +973,7 @@ describe('web access config resolution', () => {
       await handleWebCommand(
         {
           port: '58627',
-          host: '127.0.0.3',
+          host: ['127.0.0.3', '127.0.0.4'],
           allowedHost: ['.cli.local'],
           open: false,
         },
@@ -977,8 +989,70 @@ describe('web access config resolution', () => {
         },
       );
 
-      expect(calls.options?.host).toBe('127.0.0.3');
+      expect(calls.options?.hosts).toEqual(['127.0.0.3', '127.0.0.4']);
       expect(calls.options?.allowedHosts).toEqual(['.cli.local', '.config.local']);
+    });
+
+    it('forces loopback when remote control is requested with an array non-loopback [web].host in config', async () => {
+      const { handleWebCommand } = await import('#/cli/sub/web/run');
+      let capturedOptions: ParsedServerOptions | undefined;
+      const startServerForeground = vi.fn(async (options: ParsedServerOptions) => {
+        capturedOptions = options;
+        return undefined as never;
+      });
+      const { stdout, stderr } = makeIo();
+
+      await handleWebCommand(
+        { remoteControl: true, open: false },
+        {
+          startServerForeground,
+          openUrl: vi.fn(),
+          loadConfig: async () => ({
+            ...DEFAULT_TUI_CONFIG,
+            web: { host: ['127.0.0.1', '100.91.250.65'], allowedHosts: ['.custom.test'] },
+          }),
+          stdout,
+          stderr,
+        },
+      );
+
+      expect(capturedOptions?.hosts).toEqual(['127.0.0.1']);
+      expect(capturedOptions?.allowedHosts).toEqual(['.custom.test']);
+    });
+
+    it('allows explicit all-loopback repeatable --host with remote control', async () => {
+      const { handleWebCommand } = await import('#/cli/sub/web/run');
+      let capturedOptions: ParsedServerOptions | undefined;
+      const startServerForeground = vi.fn(async (options: ParsedServerOptions) => {
+        capturedOptions = options;
+        return undefined as never;
+      });
+      const { stdout, stderr } = makeIo();
+
+      await handleWebCommand(
+        { remoteControl: true, host: ['127.0.0.1', '127.0.0.2'], open: false },
+        {
+          startServerForeground,
+          openUrl: vi.fn(),
+          stdout,
+          stderr,
+        },
+      );
+
+      expect(capturedOptions?.hosts).toEqual(['127.0.0.1', '127.0.0.2']);
+    });
+
+    it('rejects explicit non-loopback list --host with remote control', async () => {
+      const { handleWebCommand } = await import('#/cli/sub/web/run');
+      const startServerForeground = vi.fn(async () => undefined as never);
+      const { stdout, stderr } = makeIo();
+
+      await expect(
+        handleWebCommand(
+          { remoteControl: true, host: ['127.0.0.1', '100.91.250.65'], open: false },
+          { startServerForeground, openUrl: vi.fn(), stdout, stderr },
+        ),
+      ).rejects.toThrow('--remote-control requires a loopback host.');
     });
 
     it('degrades to defaults when loadConfig throws TuiConfigParseError', async () => {
@@ -999,7 +1073,7 @@ describe('web access config resolution', () => {
         },
       );
 
-      expect(calls.options?.host).toBe('127.0.0.1');
+      expect(calls.options?.hosts).toEqual(['127.0.0.1']);
       expect(calls.options?.allowedHosts).toEqual([]);
     });
 
@@ -1021,7 +1095,7 @@ describe('web access config resolution', () => {
         },
       );
 
-      expect(calls.options?.host).toBe('127.0.0.1');
+      expect(calls.options?.hosts).toEqual(['127.0.0.1']);
       expect(calls.options?.allowedHosts).toEqual([]);
     });
 

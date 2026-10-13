@@ -570,7 +570,7 @@ MCP server 的声明配置写在 `~/.kimi-code/mcp.json` 或项目内 `.kimi-cod
 | `[upgrade].auto_install` | `boolean` | `true` | 是否自动安装新版本 |
 | `[status_line].items` | `string[]` | `[]` | 底部状态栏第一行的内置槽位及顺序：`mode`、`goal`、`model`、`tasks`、`cwd`、`git`、`tips`，未知 id 跳过并告警 |
 | `[status_line].command` | `string` | `""` | 自定义状态栏命令：stdout 首行替换状态栏，stdin 收 JSON 快照；上限 300ms、每秒一次，失败回退内置布局 |
-| `[web].host` | `string` | — | `kimi web` 的绑定地址（单个 IP/主机名；优先级：`--host` 参数 > `KIMI_CODE_HOST` > `web.host` > `127.0.0.1`） |
+| `[web].host` | `string | string[]` | — | `kimi web` 的绑定地址（单个 IP/主机名或数组；优先级：`--host` 参数 > `KIMI_CODE_HOST` > `web.host` > `127.0.0.1`，高优先级来源完全覆盖而非取并集） |
 | `[web].allowed_hosts` | `string[]` | `[]` | DNS 重绑定检查额外允许的 Host 头（与 `--allowed-host` 及 `KIMI_CODE_ALLOWED_HOSTS` 取并集） |
 
 <details>
@@ -604,7 +604,7 @@ auto_install = true
 # command = "~/.kimi-code/statusline.sh"
 
 # [web]
-# host = "127.0.0.1"
+# host = "127.0.0.1" # 或 ["127.0.0.1", "100.91.250.65"] 同时绑定多个地址
 # allowed_hosts = [".example.test"]
 ```
 

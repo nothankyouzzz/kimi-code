@@ -39,7 +39,7 @@ Stop:    Ctrl+C
 | 选项 | 说明 |
 | --- | --- |
 | `--port <port>` | 绑定端口；默认 `58627`，被占用时自动 +1 重试 |
-| `--host [host]` | 实现同一局域网下的手机、平板或其他电脑都能用 web 地址访问，也可指定 IP，如 `--host 192.168.1.10`；也可由 `KIMI_CODE_HOST` 或 `tui.toml` 中的 `[web].host` 指定 |
+| `--host [host]` | 实现同一局域网下的手机、平板或其他电脑都能用 web 地址访问，也可指定 IP，如 `--host 192.168.1.10`；可重复指定；也可由 `KIMI_CODE_HOST` 或 `tui.toml` 中的 `[web].host` 指定 |
 | `--no-open` | 就绪后不自动打开浏览器 |
 | `--log-level <level>` | 按所选级别开启服务日志；默认不输出 |
 

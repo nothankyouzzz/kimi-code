@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { classify } from '../src/security/bindClassify';
+import { classify, classifyHosts } from '../src/security/bindClassify';
 
 describe('classify', () => {
   describe('loopback', () => {
@@ -69,5 +69,27 @@ describe('classify', () => {
   it('bindClass override does not reclassify a concrete loopback/lan host', () => {
     expect(classify('127.0.0.1', { bindClass: 'public' })).toBe('loopback');
     expect(classify('192.168.1.5', { bindClass: 'public' })).toBe('lan');
+  });
+});
+
+describe('classifyHosts', () => {
+  it('classifies empty set as loopback', () => {
+    expect(classifyHosts([])).toBe('loopback');
+  });
+
+  it('classifies set of loopback hosts as loopback', () => {
+    expect(classifyHosts(['127.0.0.1', '::1', 'localhost'])).toBe('loopback');
+  });
+
+  it('classifies loopback + lan as lan', () => {
+    expect(classifyHosts(['127.0.0.1', '192.168.1.5'])).toBe('lan');
+  });
+
+  it('classifies loopback + public as public', () => {
+    expect(classifyHosts(['127.0.0.1', '100.91.250.65'])).toBe('public');
+  });
+
+  it('classifies loopback + lan + public as public', () => {
+    expect(classifyHosts(['127.0.0.1', '192.168.1.1', '100.91.250.65'])).toBe('public');
   });
 });

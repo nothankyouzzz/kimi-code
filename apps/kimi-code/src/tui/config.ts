@@ -56,13 +56,15 @@ export const DEFAULT_STATUS_LINE_CONFIG: StatusLineConfig = {
   command: null,
 };
 
+export const WebConfigHostSchema = z.union([z.string(), z.array(z.string())]);
+
 export const WebConfigFileSchema = z.object({
-  host: z.string().optional(),
+  host: WebConfigHostSchema.optional(),
   allowed_hosts: z.array(z.string()).optional(),
 });
 
 export const WebConfigSchema = z.object({
-  host: z.string().optional(),
+  host: WebConfigHostSchema.optional(),
   allowedHosts: z.array(z.string()),
 });
 export type WebConfig = z.infer<typeof WebConfigSchema>;
@@ -247,6 +249,24 @@ export async function saveTuiConfig(
   await writeFile(filePath, renderTuiConfig(config), 'utf-8');
 }
 
+export function normalizeConfigHost(
+  raw: string | readonly string[] | undefined,
+): string | string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    return trimmed.length === 0 ? undefined : trimmed;
+  }
+  const result: string[] = [];
+  for (const item of raw) {
+    const trimmed = item.trim();
+    if (trimmed.length > 0 && !result.includes(trimmed)) {
+      result.push(trimmed);
+    }
+  }
+  return result.length === 0 ? undefined : result;
+}
+
 export function normalizeTuiConfig(
   config: TuiConfigFileShape,
   warn: (message: string) => void = (message) => {
@@ -313,7 +333,7 @@ export function normalizeTuiConfig(
       mermaid: mermaidMode,
     },
     web: {
-      host: config.web?.host?.trim() === '' ? undefined : config.web?.host?.trim(),
+      host: normalizeConfigHost(config.web?.host),
       allowedHosts: config.web?.allowed_hosts ?? DEFAULT_WEB_CONFIG.allowedHosts,
     },
   });
@@ -338,7 +358,11 @@ export function renderTuiConfig(config: TuiConfig): string {
   const webAllowedHosts = config.web?.allowedHosts;
   const webLines: string[] = [];
   if (webHost !== undefined) {
-    webLines.push(`host = "${escapeTomlBasicString(webHost)}"`);
+    if (Array.isArray(webHost)) {
+      webLines.push(`host = ${JSON.stringify(webHost)}`);
+    } else {
+      webLines.push(`host = "${escapeTomlBasicString(webHost)}"`);
+    }
   }
   if (webAllowedHosts !== undefined && webAllowedHosts.length > 0) {
     webLines.push(`allowed_hosts = ${JSON.stringify(webAllowedHosts)}`);
@@ -348,7 +372,7 @@ export function renderTuiConfig(config: TuiConfig): string {
       ? `[web]\n${webLines.join('\n')}\n`
       : `# [web]
 # Bind address for "kimi web" (default: 127.0.0.1; "0.0.0.0" binds all interfaces).
-# host = "127.0.0.1"
+# host = "127.0.0.1" # or ["127.0.0.1", "100.91.250.65"] to bind several addresses
 # Extra Host header values allowed through the DNS-rebinding check.
 # Leading dot matches domain suffixes (e.g. ".example.test").
 # allowed_hosts = [".example.test"]

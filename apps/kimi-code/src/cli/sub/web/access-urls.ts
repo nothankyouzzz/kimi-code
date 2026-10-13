@@ -55,7 +55,13 @@ export function browserOpenOrigin(origin: string): string {
 
 /** True when `host` is a loopback address (this host only). */
 export function isLoopbackHost(host: string): boolean {
-  return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  return (
+    host === 'localhost' ||
+    host === '::1' ||
+    host === '[::1]' ||
+    host.startsWith('127.') ||
+    host.endsWith('.localhost')
+  );
 }
 
 function hostOrigin(host: string, port: number): string {
@@ -72,12 +78,13 @@ function hostOrigin(host: string, port: number): string {
  * - specific host: a single `URL:` line.
  */
 export function accessUrlLines(
-  host: string,
+  host: string | readonly string[],
   port: number,
   token: string | undefined,
   networkAddresses?: NetworkAddress[],
 ): AccessUrlLine[] {
-  if (isWildcard(host)) {
+  const hosts = Array.isArray(host) ? host : [host];
+  if (hosts.some(isWildcard)) {
     const lines: AccessUrlLine[] = [
       { label: 'Local:    ', url: buildOpenableUrl(`http://localhost:${port}`, token) },
     ];
@@ -90,8 +97,14 @@ export function accessUrlLines(
     }
     return lines;
   }
-  if (isLoopbackHost(host)) {
-    return [{ label: 'Local:    ', url: buildOpenableUrl(hostOrigin(host, port), token) }];
+  const first = hosts[0];
+  if (hosts.length === 1 && first !== undefined && !isLoopbackHost(first)) {
+    return [{ label: 'URL:      ', url: buildOpenableUrl(hostOrigin(first, port), token) }];
   }
-  return [{ label: 'URL:      ', url: buildOpenableUrl(hostOrigin(host, port), token) }];
+  const lines: AccessUrlLine[] = [];
+  for (const h of hosts) {
+    const label = isLoopbackHost(h) ? 'Local:    ' : 'Network:  ';
+    lines.push({ label, url: buildOpenableUrl(hostOrigin(h, port), token) });
+  }
+  return lines;
 }

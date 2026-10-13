@@ -571,4 +571,41 @@ host = "   "
       allowedHosts: ['.example.test', 'host.test'],
     });
   });
+
+  it('parses host as array of strings and deduplicates/drops empty entries', () => {
+    const config = parseTuiConfig(`
+[web]
+host = ["127.0.0.1", "100.91.250.65", "127.0.0.1", "  ", ""]
+`);
+
+    expect(config.web?.host).toEqual(['127.0.0.1', '100.91.250.65']);
+  });
+
+  it('normalizes array with only whitespace entries to undefined', () => {
+    const config = parseTuiConfig(`
+[web]
+host = ["  ", ""]
+`);
+
+    expect(config.web?.host).toBeUndefined();
+  });
+
+  it('preserves an array host across save and reload', async () => {
+    await saveTuiConfig(
+      {
+        ...DEFAULT_TUI_CONFIG,
+        web: { host: ['127.0.0.1', '100.91.250.65'], allowedHosts: [] },
+      },
+      filePath,
+    );
+
+    const text = readFileSync(filePath, 'utf-8');
+    expect(text).toContain('\n[web]\n');
+    expect(text).toContain('host = ["127.0.0.1","100.91.250.65"]');
+    const reloaded = await loadTuiConfig(filePath);
+    expect(reloaded.web).toEqual({
+      host: ['127.0.0.1', '100.91.250.65'],
+      allowedHosts: [],
+    });
+  });
 });

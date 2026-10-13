@@ -170,7 +170,7 @@ kimi web --port 58628    # 指定绑定端口
 | 选项 | 说明 |
 | --- | --- |
 | `--port <port>` | 绑定端口；默认 `58627`；被占用时自动 +1 重试 |
-| `--host [host]` | 绑定地址；缺省 `127.0.0.1`（仅本机），裸 `--host` 绑 `0.0.0.0`（所有网卡）；也可由 `KIMI_CODE_HOST` 或 `tui.toml` 中的 `[web].host` 指定 |
+| `--host [host]` | 绑定地址；缺省 `127.0.0.1`（仅本机），裸 `--host` 绑 `0.0.0.0`（所有网卡）；可重复指定；也可由 `KIMI_CODE_HOST` 或 `tui.toml` 中的 `[web].host` 指定 |
 | `--allowed-host <host...>` | DNS 重绑定检查额外允许的 Host 头，可重复或逗号分隔；也可由 `KIMI_CODE_ALLOWED_HOSTS` 或 `tui.toml` 中的 `[web].allowed_hosts` 指定 |
 | `--log-level <level>` | 按所选级别开启服务日志；默认不输出 |
 | `--debug-endpoints` | 挂载 `/api/v1/debug/*` 调试路由（默认关闭） |

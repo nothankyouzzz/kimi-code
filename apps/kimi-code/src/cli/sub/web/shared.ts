@@ -34,7 +34,7 @@ export const VALID_LOG_LEVELS: readonly ServerLogLevel[] = [
 ];
 
 export interface ParsedServerOptions {
-  host: string;
+  hosts: readonly string[];
   port: number;
   logLevel: ServerLogLevel;
   debugEndpoints: boolean;
@@ -51,7 +51,7 @@ export interface ParsedServerOptions {
 }
 
 export interface ServerCliOptions {
-  host?: string | boolean;
+  host?: string | boolean | (string | boolean)[];
   port?: string;
   logLevel?: string;
   debugEndpoints?: boolean;
@@ -67,24 +67,48 @@ export interface ServerCliOptions {
   webTitle?: string;
 }
 
-export function resolveHost(
-  cliHost: string | boolean | undefined,
+function normalizeHostSet(entries: Iterable<string>): readonly string[] | undefined {
+  const cleaned: string[] = [];
+  let isWildcard = false;
+  for (const entry of entries) {
+    const trimmed = entry.trim();
+    if (trimmed.length === 0) continue;
+    if (trimmed === DEFAULT_LAN_HOST || trimmed === '::') {
+      isWildcard = true;
+    } else if (!cleaned.includes(trimmed)) {
+      cleaned.push(trimmed);
+    }
+  }
+  if (isWildcard) return [DEFAULT_LAN_HOST];
+  return cleaned.length > 0 ? cleaned : undefined;
+}
+
+export function resolveHosts(
+  cliHost: string | boolean | (string | boolean)[] | undefined,
   envHost: string | undefined,
-  configHost: string | undefined,
-): string {
+  configHost: string | readonly string[] | undefined,
+): readonly string[] {
   if (cliHost !== undefined && cliHost !== false) {
-    if (cliHost === true || cliHost === '') return DEFAULT_LAN_HOST;
-    return cliHost;
+    if (cliHost === true || cliHost === '') return [DEFAULT_LAN_HOST];
+    const rawList = Array.isArray(cliHost) ? cliHost : [cliHost];
+    if (rawList.some((h) => h === true || h === '')) return [DEFAULT_LAN_HOST];
+    const strings = rawList.filter((h): h is string => typeof h === 'string');
+    const normalized = normalizeHostSet(strings);
+    if (normalized !== undefined) return normalized;
   }
-  const envTrimmed = envHost?.trim();
-  if (envTrimmed !== undefined && envTrimmed.length > 0) {
-    return envTrimmed;
+
+  if (envHost !== undefined) {
+    const normalized = normalizeHostSet(envHost.split(','));
+    if (normalized !== undefined) return normalized;
   }
-  const configTrimmed = configHost?.trim();
-  if (configTrimmed !== undefined && configTrimmed.length > 0) {
-    return configTrimmed;
+
+  if (configHost !== undefined) {
+    const entries = Array.isArray(configHost) ? configHost : [configHost];
+    const normalized = normalizeHostSet(entries);
+    if (normalized !== undefined) return normalized;
   }
-  return DEFAULT_SERVER_HOST;
+
+  return [DEFAULT_SERVER_HOST];
 }
 
 export function resolveAllowedHosts(
@@ -102,7 +126,7 @@ export function resolveServerOptions(
   env: NodeJS.ProcessEnv = process.env,
 ): ParsedServerOptions {
   return {
-    host: resolveHost(opts.host, env['KIMI_CODE_HOST'], config?.web?.host),
+    hosts: resolveHosts(opts.host, env['KIMI_CODE_HOST'], config?.web?.host),
     port: parsePort(opts.port, '--port', DEFAULT_SERVER_PORT),
     logLevel: parseLogLevel(opts.logLevel ?? DEFAULT_FOREGROUND_LOG_LEVEL),
     debugEndpoints: opts.debugEndpoints === true,

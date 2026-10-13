@@ -51,7 +51,7 @@ import {
 } from './services/pinoLoggerService';
 import { join } from 'node:path';
 import type { Socket } from 'node:net';
-import type { IncomingMessage } from 'node:http';
+import http, { type IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 
 import {
@@ -64,7 +64,7 @@ import type { ConfigWarningItem } from './transport/ws/v1/events';
 import { registerWsV1, WS_PATH as WS_PATH_V1 } from './transport/ws/v1/registerWsV1';
 import { registerWsDebug, WS_DEBUG_PATH } from './transport/ws/debug/registerWsDebug';
 import { getServerVersion } from './version';
-import { classify } from './security/bindClassify';
+import { classifyHosts } from './security/bindClassify';
 import {
   createHostCheck,
   isHostCheckDisabled,
@@ -98,7 +98,8 @@ export interface ServerHostIdentity extends KimiHostIdentity {
 }
 
 export interface ServerStartOptions {
-  readonly host?: string;
+  readonly host?: string | readonly string[];
+  readonly hosts?: readonly string[];
   readonly port?: number;
   readonly homeDir?: string;
   readonly env?: NodeJS.ProcessEnv;
@@ -132,6 +133,7 @@ export interface RunningServer {
   readonly connectionRegistry: IConnectionRegistry;
   readonly authTokenService: IAuthTokenService;
   readonly host: string;
+  readonly hosts: readonly string[];
   readonly port: number;
   close(): Promise<void>;
 }
@@ -139,8 +141,29 @@ export interface RunningServer {
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 58627;
 
+function normalizeStartHosts(opts: ServerStartOptions): readonly string[] {
+  const raw =
+    opts.hosts ??
+    (Array.isArray(opts.host) ? opts.host : opts.host !== undefined ? [opts.host] : [DEFAULT_HOST]);
+  const cleaned: string[] = [];
+  for (const h of raw) {
+    const trimmed = h.trim();
+    if (trimmed.length > 0 && !cleaned.includes(trimmed)) {
+      cleaned.push(trimmed);
+    }
+  }
+  if (cleaned.length === 0) {
+    return [DEFAULT_HOST];
+  }
+  if (cleaned.some((h) => h === '0.0.0.0' || h === '::')) {
+    return [cleaned.find((h) => h === '0.0.0.0' || h === '::')!];
+  }
+  return cleaned;
+}
+
 export async function startServer(opts: ServerStartOptions): Promise<RunningServer> {
-  const host = opts.host ?? DEFAULT_HOST;
+  const hosts = normalizeStartHosts(opts);
+  const host = hosts[0]!;
   const port = opts.port ?? DEFAULT_PORT;
   const homeDir = resolveKimiHome(opts.homeDir);
   const serverVersion = opts.serverVersion ?? getServerVersion();
@@ -154,11 +177,11 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
     startedAt: Date.now(),
     serverVersion,
   });
-  const exposureClass = classify(host, { bindClass: opts.bindClass });
+  const exposureClass = classifyHosts(hosts, { bindClass: opts.bindClass });
   if (exposureClass !== 'loopback' && opts.insecureNoTls !== true) {
     await registration.release();
     throw new Error(
-      `Refusing to bind ${host} (${exposureClass}) without TLS; terminate TLS at a reverse proxy or pass --insecure-no-tls.`,
+      `Refusing to bind ${hosts.join(', ')} (${exposureClass}) without TLS; terminate TLS at a reverse proxy or pass --insecure-no-tls.`,
     );
   }
   const enableShutdown = exposureClass === 'loopback' || opts.allowRemoteShutdown === true;
@@ -247,12 +270,12 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
 
   if (exposureClass !== 'loopback') {
     logger.warn(
-      { host, exposureClass },
+      { hosts, exposureClass },
       'binding non-loopback host without TLS — use a reverse proxy or tunnel in production',
     );
     if (!passwordConfigured) {
       logger.warn(
-        { host, exposureClass },
+        { hosts, exposureClass },
         'binding non-loopback host with token-only auth (no KIMI_CODE_PASSWORD) — the bearer token printed in the startup banner is the only credential protecting this server',
       );
     }
@@ -292,7 +315,7 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
   app.setSerializerCompiler(() => (data) => JSON.stringify(data));
   installErrorHandler(app);
   const hostCheck = createHostCheck({
-    boundHost: host,
+    boundHost: hosts,
     extra: [...parseAllowedHosts(process.env), ...(opts.allowedHosts ?? [])],
     disable: opts.disableHostCheck ?? isHostCheckDisabled(),
   });
@@ -306,7 +329,7 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
     );
   } else {
     logger.warn(
-      { host, exposureClass },
+      { hosts, exposureClass },
       'DANGEROUS: bearer-token auth is DISABLED (--dangerous-bypass-auth) — every REST and WebSocket route accepts unauthenticated requests',
     );
   }
@@ -314,12 +337,16 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
     app.addHook('onSend', createSecurityHeadersHook({ tls: false }));
   }
 
+  const secondaryServers: http.Server[] = [];
   const close = async (): Promise<void> => {
     if (wssDebug !== undefined) {
       for (const client of wssDebug.clients) client.terminate();
     }
     configChangedPublisher.close();
     await remoteControlManager.close();
+    for (const server of secondaryServers) {
+      await closeHttpServer(server);
+    }
     await app.close();
     configWarningSubscription.dispose();
     pluginChangeSubscription.dispose();
@@ -573,6 +600,9 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
     connectionRegistry.closeAll('server shutting down');
     wssV1.close();
     wssDebug?.close();
+    for (const server of secondaryServers) {
+      await closeHttpServer(server);
+    }
     await broadcaster.close();
   });
 
@@ -592,12 +622,15 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
   }
 
   try {
-    await listenWithPortRetry({
-      listen: (h, p) => app.listen({ host: h, port: p }),
-      host,
+    const groupResult = await listenGroupWithPortRetry({
+      app,
+      hosts,
       port,
       logger,
+      handleUpgrade,
     });
+    boundPort = groupResult.boundPort;
+    secondaryServers.push(...groupResult.secondaryServers);
   } catch (error) {
     try {
       await close();
@@ -606,8 +639,6 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
     throw error;
   }
 
-  const address = app.server.address();
-  boundPort = typeof address === 'object' && address !== null ? address.port : port;
   await registration.update({ port: boundPort });
 
   void modelCatalogRefreshScheduler.start().catch((error) => {
@@ -620,50 +651,172 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
   process.on('unhandledRejection', onUnhandledRejection);
   process.on('uncaughtException', onUncaughtException);
 
-  return { app, core, connectionRegistry, authTokenService, host, port: boundPort, close };
+  return { app, core, connectionRegistry, authTokenService, host, hosts, port: boundPort, close };
+}
+
+interface ListenGroupOptions {
+  readonly app: FastifyInstance;
+  readonly hosts: readonly string[];
+  readonly port: number;
+  readonly logger: ServerLogger;
+  readonly handleUpgrade: (req: IncomingMessage, socket: Duplex, head: Buffer) => Promise<void>;
+  readonly maxRetries?: number;
+}
+
+function listenHttpServer(server: http.Server, host: string, port: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onError = (err: Error) => {
+      server.off('listening', onListening);
+      reject(err);
+    };
+    const onListening = () => {
+      server.off('error', onError);
+      resolve();
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen({ host, port });
+  });
+}
+
+function closeHttpServer(server: http.Server): Promise<void> {
+  if (!server.listening) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    server.closeAllConnections?.();
+    server.close(() => {
+      resolve();
+    });
+  });
+}
+
+async function listenGroupWithPortRetry(
+  opts: ListenGroupOptions,
+): Promise<{ boundPort: number; secondaryServers: http.Server[] }> {
+  const primaryHost = opts.hosts[0]!;
+  const secondaryHosts = opts.hosts.slice(1);
+
+  if (opts.port === 0) {
+    try {
+      await opts.app.listen({ host: primaryHost, port: 0 });
+    } catch (error) {
+      const failError = new Error(
+        `Failed to bind ${primaryHost}:0: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+      if (error && typeof error === 'object' && 'code' in error) {
+        (failError as NodeJS.ErrnoException).code = (error as NodeJS.ErrnoException).code;
+      }
+      throw failError;
+    }
+    const address = opts.app.server.address();
+    const bound =
+      typeof address === 'object' && address !== null
+        ? address.port
+        : 0;
+    const secondaryServers: http.Server[] = [];
+    for (const h of secondaryHosts) {
+      const sec = http.createServer((req, res) => {
+        opts.app.routing(req, res);
+      });
+      sec.requestTimeout = 0;
+      sec.on('upgrade', (req, socket, head) => {
+        void opts.handleUpgrade(req, socket, head).catch((error: unknown) => {
+          opts.logger.error({ err: error }, 'ws upgrade handler failed');
+        });
+      });
+      try {
+        await listenHttpServer(sec, h, bound);
+        secondaryServers.push(sec);
+      } catch (error) {
+        for (const s of secondaryServers) {
+          await closeHttpServer(s);
+        }
+        await opts.app.close();
+        const failError = new Error(
+          `Failed to bind ${h}:${bound}: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
+        if (error && typeof error === 'object' && 'code' in error) {
+          (failError as NodeJS.ErrnoException).code = (error as NodeJS.ErrnoException).code;
+        }
+        throw failError;
+      }
+    }
+    return { boundPort: bound, secondaryServers };
+  }
+
+  const maxRetries = opts.maxRetries ?? PORT_RETRY_LIMIT;
+  let currentPort = opts.port;
+  for (let attempt = 0; ; attempt++) {
+    const secondaryServers: http.Server[] = [];
+    let failedHost: string | undefined;
+    let failErr: unknown;
+
+    for (const h of secondaryHosts) {
+      const sec = http.createServer((req, res) => {
+        opts.app.routing(req, res);
+      });
+      sec.requestTimeout = 0;
+      sec.on('upgrade', (req, socket, head) => {
+        void opts.handleUpgrade(req, socket, head).catch((error: unknown) => {
+          opts.logger.error({ err: error }, 'ws upgrade handler failed');
+        });
+      });
+      try {
+        await listenHttpServer(sec, h, currentPort);
+        secondaryServers.push(sec);
+      } catch (error) {
+        failedHost = h;
+        failErr = error;
+        break;
+      }
+    }
+
+    if (failedHost === undefined) {
+      try {
+        await opts.app.listen({ host: primaryHost, port: currentPort });
+      } catch (error) {
+        failedHost = primaryHost;
+        failErr = error;
+      }
+    }
+
+    if (failedHost === undefined) {
+      if (currentPort !== opts.port) {
+        opts.logger.warn(
+          { requestedPort: opts.port, port: currentPort, hosts: opts.hosts },
+          'requested port was busy; server bound to a higher port',
+        );
+      }
+      return { boundPort: currentPort, secondaryServers };
+    }
+
+    for (const s of secondaryServers) {
+      await closeHttpServer(s);
+    }
+
+    const code = (failErr as NodeJS.ErrnoException | undefined)?.code;
+    if (code !== 'EADDRINUSE' || attempt >= maxRetries || currentPort >= 65535) {
+      const failError = new Error(
+        `Failed to bind ${failedHost}:${currentPort}: ${failErr instanceof Error ? failErr.message : String(failErr)}`,
+        { cause: failErr },
+      );
+      if (failErr && typeof failErr === 'object' && 'code' in failErr) {
+        (failError as NodeJS.ErrnoException).code = (failErr as NodeJS.ErrnoException).code;
+      }
+      throw failError;
+    }
+
+    const nextPort = currentPort + 1;
+    opts.logger.warn(
+      { host: failedHost, port: currentPort, next: nextPort },
+      'port in use by another process, trying next port',
+    );
+    currentPort = nextPort;
+  }
 }
 
 export const PORT_RETRY_LIMIT = 100;
 
-export interface ListenWithPortRetryOptions {
-  readonly listen: (host: string, port: number) => Promise<string>;
-  readonly host: string;
-  readonly port: number;
-  readonly logger: ServerLogger;
-  readonly maxRetries?: number;
-}
-
-export async function listenWithPortRetry(
-  opts: ListenWithPortRetryOptions,
-): Promise<{ address: string; port: number }> {
-  if (opts.port === 0) {
-    const address = await opts.listen(opts.host, 0);
-    return { address, port: 0 };
-  }
-
-  const maxRetries = opts.maxRetries ?? PORT_RETRY_LIMIT;
-  let port = opts.port;
-  for (let attempt = 0; ; attempt++) {
-    try {
-      const address = await opts.listen(opts.host, port);
-      if (port !== opts.port) {
-        opts.logger.warn(
-          { requestedPort: opts.port, port, host: opts.host },
-          'requested port was busy; server bound to a higher port',
-        );
-      }
-      return { address, port };
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'EADDRINUSE' || attempt >= maxRetries || port >= 65535) {
-        throw error;
-      }
-      const next = port + 1;
-      opts.logger.warn(
-        { host: opts.host, port, next },
-        'port in use by another process, trying next port',
-      );
-      port = next;
-    }
-  }
-}

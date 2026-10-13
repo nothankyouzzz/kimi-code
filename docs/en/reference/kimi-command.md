@@ -170,7 +170,7 @@ Multiple instances can share one home directory: each registers itself under `~/
 | Option | Description |
 | --- | --- |
 | `--port <port>` | Bind port; defaults to `58627`; a busy port is retried with `+1` |
-| `--host [host]` | Bind host; omit for `127.0.0.1` (this machine only), pass a bare `--host` for `0.0.0.0` (all interfaces); can also come from `KIMI_CODE_HOST` or `tui.toml` `[web].host` |
+| `--host [host]` | Bind host; omit for `127.0.0.1` (this machine only), pass a bare `--host` for `0.0.0.0` (all interfaces); repeatable; can also come from `KIMI_CODE_HOST` or `tui.toml` `[web].host` |
 | `--allowed-host <host...>` | Extra Host header values allowed through the DNS-rebinding check; repeatable or comma-separated; can also come from `KIMI_CODE_ALLOWED_HOSTS` or `tui.toml` `[web].allowed_hosts` |
 | `--log-level <level>` | Enable server logs at the selected level; omitted by default |
 | `--debug-endpoints` | Mount `/api/v1/debug/*` routes (off by default) |

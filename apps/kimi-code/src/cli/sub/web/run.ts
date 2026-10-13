@@ -127,6 +127,14 @@ export function buildWebUrl(origin: string, token: string): string {
   return buildOpenableUrl(origin, token);
 }
 
+export function collectHostOption(
+  val: string,
+  prev: string[] | boolean | undefined,
+): string[] {
+  const list = Array.isArray(prev) ? prev : (prev === true ? [DEFAULT_LAN_HOST] : []);
+  return [...list, val];
+}
+
 /** Build the `web` command, mounting the runner action on `cmd` itself. */
 export function buildWebCommand(
   cmd: Command,
@@ -141,7 +149,9 @@ export function buildWebCommand(
     )
     .option(
       '--host [host]',
-      `Bind host. Omit to bind ${DEFAULT_SERVER_HOST} (this machine only); pass --host to bind ${DEFAULT_LAN_HOST} (all interfaces), or --host <host> for a specific host. Can also be set via KIMI_CODE_HOST or tui.toml [web].host. The bearer token is printed at startup.`,
+      `Bind host. Omit to bind ${DEFAULT_SERVER_HOST} (this machine only); pass --host to bind ${DEFAULT_LAN_HOST} (all interfaces), or --host <host> for a specific host. Repeatable. Can also be set via KIMI_CODE_HOST or tui.toml [web].host. The bearer token is printed at startup.`,
+      collectHostOption,
+      undefined,
     )
     .option(
       '--allowed-host <host...>',
@@ -235,7 +245,7 @@ export async function handleWebCommand(
   if (opts.remoteControl === true && parsed.dangerousBypassAuth) {
     throw new Error('--remote-control cannot be combined with --dangerous-bypass-auth.');
   }
-  if (opts.remoteControl === true && !isLoopbackHost(parsed.host)) {
+  if (opts.remoteControl === true && !parsed.hosts.every(isLoopbackHost)) {
     throw new Error('--remote-control requires a loopback host.');
   }
   const run = deps.startServerForeground ?? startServerForeground;
@@ -302,7 +312,7 @@ export async function handleWebCommand(
       }
       deps.stdout.write(
         parsed.logLevel === DEFAULT_FOREGROUND_LOG_LEVEL
-          ? formatReadyBanner(origin, parsed.host, {
+          ? formatReadyBanner(origin, parsed.hosts, {
               token,
               networkAddresses: deps.networkAddresses,
               dangerousBypassAuth: parsed.dangerousBypassAuth,
@@ -409,7 +419,7 @@ async function runServerInProcess(
     );
   }
   const v2 = await startServer({
-    host: options.host,
+    hosts: options.hosts,
     port: options.port,
     // Report the CLI's product version as `server_version` (/meta, web UI)
     // rather than kap-server's private package version.
@@ -510,7 +520,7 @@ interface FormatReadyBannerOptions {
 
 export function formatReadyBanner(
   origin: string,
-  host: string,
+  host: string | readonly string[],
   opts: FormatReadyBannerOptions = {},
 ): string {
   const primary = (text: string): string => chalk.hex(darkColors.primary)(text);
@@ -543,9 +553,10 @@ export function formatReadyBanner(
     lines.push(...formatDangerNoticeLines(), '');
   }
 
+  const hostList = Array.isArray(host) ? host : [host];
   // Access links.
   for (const { label: text, url: href } of accessUrlLines(
-    host,
+    hostList,
     port,
     opts.token,
     opts.networkAddresses,
@@ -553,7 +564,7 @@ export function formatReadyBanner(
     lines.push(`  ${label(text)}${urlWithDimToken(href)}`);
   }
   // On a loopback bind there is no network URL; show how to enable one.
-  if (isLoopbackHost(host)) {
+  if (hostList.every(isLoopbackHost)) {
     lines.push(`  ${label('Network:  ')}${muted('off')}${dim('  use --host to enable')}`);
   }
   if (opts.token !== undefined) {

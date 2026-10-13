@@ -39,7 +39,7 @@ The `#token=` fragment is the access credential — don't share it. Stop the ser
 | Option | Description |
 | --- | --- |
 | `--port <port>` | Bind port; defaults to `58627`, auto-increments when taken |
-| `--host [host]` | Let phones, tablets, or other computers on the same LAN access the web address; you can also specify an IP, e.g. `--host 192.168.1.10`. Can also come from `KIMI_CODE_HOST` or `tui.toml` `[web].host` |
+| `--host [host]` | Let phones, tablets, or other computers on the same LAN access the web address; you can also specify an IP, e.g. `--host 192.168.1.10`. Repeatable. Can also come from `KIMI_CODE_HOST` or `tui.toml` `[web].host` |
 | `--no-open` | Don't open the browser when ready |
 | `--log-level <level>` | Enable server logs at the given level; off by default |
 

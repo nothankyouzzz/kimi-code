@@ -171,7 +171,7 @@ describe('handleWebCommand', () => {
 
     expect(mocks.startServerForeground).toHaveBeenCalledWith(
       expect.objectContaining({
-        host: '100.91.250.65',
+        hosts: ['100.91.250.65'],
         allowedHosts: ['.custom.test'],
       }),
       expect.anything(),
@@ -384,7 +384,7 @@ describe('handleRemoteControlCommand', () => {
 
     expect(mocks.startServerForeground).toHaveBeenCalledWith(
       expect.objectContaining({
-        host: '127.0.0.1',
+        hosts: ['127.0.0.1'],
         allowedHosts: ['.custom.test'],
       }),
       expect.anything(),

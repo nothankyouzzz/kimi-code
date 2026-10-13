@@ -571,7 +571,7 @@ Alongside `config.toml`, the CLI keeps terminal-UI and client preferences in a c
 | `[upgrade].auto_install` | `boolean` | `true` | Whether new versions are installed automatically |
 | `[status_line].items` | `string[]` | `[]` | Built-in slots on the first footer line and their order: `mode`, `goal`, `model`, `tasks`, `cwd`, `git`, `tips`; unknown ids are skipped with a warning |
 | `[status_line].command` | `string` | `""` | Custom status line command: its first stdout line replaces the footer, and a JSON snapshot is passed on stdin; capped at 300ms, throttled to once per second, failures fall back to the built-in layout |
-| `[web].host` | `string` | — | Bind address for `kimi web` (single IP/host; precedence: `--host` flag > `KIMI_CODE_HOST` > `web.host` > `127.0.0.1`) |
+| `[web].host` | `string | string[]` | — | Bind address(es) for `kimi web` (a string or array of strings; precedence: `--host` flag > `KIMI_CODE_HOST` > `web.host` > `127.0.0.1`, overriding by source rather than unioning) |
 | `[web].allowed_hosts` | `string[]` | `[]` | Extra `Host` header values allowed through the DNS-rebinding check (unioned with `--allowed-host` and `KIMI_CODE_ALLOWED_HOSTS`) |
 
 <details>
@@ -605,7 +605,7 @@ auto_install = true
 # command = "~/.kimi-code/statusline.sh"
 
 # [web]
-# host = "127.0.0.1"
+# host = "127.0.0.1" # or ["127.0.0.1", "100.91.250.65"] to bind several addresses
 # allowed_hosts = [".example.test"]
 ```
 

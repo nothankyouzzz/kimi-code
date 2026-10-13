@@ -68,3 +68,20 @@ export function classify(host: string, opts?: ClassifyOptions): BindClass {
   }
   return 'public';
 }
+
+const BIND_CLASS_RANK: Record<BindClass, number> = {
+  loopback: 0,
+  lan: 1,
+  public: 2,
+};
+
+export function classifyHosts(hosts: readonly string[], opts?: ClassifyOptions): BindClass {
+  let highest: BindClass = 'loopback';
+  for (const host of hosts) {
+    const current = classify(host, opts);
+    if (BIND_CLASS_RANK[current] > BIND_CLASS_RANK[highest]) {
+      highest = current;
+    }
+  }
+  return highest;
+}

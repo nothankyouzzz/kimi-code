@@ -18,7 +18,7 @@ import {
 } from '@moonshot-ai/agent-core-v2';
 
 import { listLiveServerInstances } from '../src/instanceRegistry';
-import { listenWithPortRetry, type RunningServer, startServer } from '../src/start';
+import { type RunningServer, startServer } from '../src/start';
 import { TEST_HOST_IDENTITY } from './helpers/hostIdentity';
 import { authedFetch } from './helpers/auth';
 
@@ -349,92 +349,6 @@ async function allocateAdjacentFreePair(
   throw new Error('could not allocate an adjacent free port pair');
 }
 
-describe('listenWithPortRetry', () => {
-  it('returns the requested port when the first listen succeeds', async () => {
-    const attempts: number[] = [];
-    const result = await listenWithPortRetry({
-      listen: async (_host, port) => {
-        attempts.push(port);
-        return `http://127.0.0.1:${String(port)}`;
-      },
-      host: '127.0.0.1',
-      port: 5000,
-      logger: silentLogger(),
-    });
-
-    expect(result.port).toBe(5000);
-    expect(attempts).toEqual([5000]);
-  });
-
-  it('retries with port+1 on EADDRINUSE until a bind succeeds', async () => {
-    const attempts: number[] = [];
-    const result = await listenWithPortRetry({
-      listen: async (_host, port) => {
-        attempts.push(port);
-        if (port < 5002) throw addrInUse();
-        return `http://127.0.0.1:${String(port)}`;
-      },
-      host: '127.0.0.1',
-      port: 5000,
-      logger: silentLogger(),
-    });
-
-    expect(result.port).toBe(5002);
-    expect(result.address).toBe('http://127.0.0.1:5002');
-    expect(attempts).toEqual([5000, 5001, 5002]);
-  });
-
-  it('does not retry on non-EADDRINUSE errors', async () => {
-    const attempts: number[] = [];
-    const boom = Object.assign(new Error('listen EACCES'), { code: 'EACCES' });
-    await expect(
-      listenWithPortRetry({
-        listen: async (_host, port) => {
-          attempts.push(port);
-          throw boom;
-        },
-        host: '127.0.0.1',
-        port: 5000,
-        logger: silentLogger(),
-      }),
-    ).rejects.toBe(boom);
-    expect(attempts).toEqual([5000]);
-  });
-
-  it('throws after exhausting maxRetries', async () => {
-    const attempts: number[] = [];
-    await expect(
-      listenWithPortRetry({
-        listen: async (_host, port) => {
-          attempts.push(port);
-          throw addrInUse();
-        },
-        host: '127.0.0.1',
-        port: 5000,
-        logger: silentLogger(),
-        maxRetries: 3,
-      }),
-    ).rejects.toMatchObject({ code: 'EADDRINUSE' });
-    expect(attempts).toEqual([5000, 5001, 5002, 5003]);
-  });
-
-  it('does not walk ports when the requested port is 0 (ephemeral)', async () => {
-    const attempts: number[] = [];
-    const result = await listenWithPortRetry({
-      listen: async (_host, port) => {
-        attempts.push(port);
-        return 'http://127.0.0.1:54321';
-      },
-      host: '127.0.0.1',
-      port: 0,
-      logger: silentLogger(),
-    });
-
-    expect(result.port).toBe(0);
-    expect(attempts).toEqual([0]);
-  });
-});
-
 describe('server-v2 boot — port retry', () => {
   let server: RunningServer | undefined;
   let home: string | undefined;
@@ -468,6 +382,66 @@ describe('server-v2 boot — port retry', () => {
       expect(instance?.port).toBe(server.port);
     } finally {
       await closeNetServer(occupant);
+    }
+  });
+
+  it('boots multiple hosts and serves routes on all bound addresses', async () => {
+    home = await mkdtemp(join(tmpdir(), 'kimi-server-v2-multi-host-'));
+    server = await startServer({
+      hostIdentity: TEST_HOST_IDENTITY,
+      hosts: ['127.0.0.1', '127.0.0.2'],
+      port: 0,
+      homeDir: home,
+      logLevel: 'silent',
+    });
+
+    expect(server.hosts).toEqual(['127.0.0.1', '127.0.0.2']);
+    const res1 = await fetch(`http://127.0.0.1:${server.port}/api/v1/healthz`);
+    expect(res1.status).toBe(200);
+    const res2 = await fetch(`http://127.0.0.2:${server.port}/api/v1/healthz`);
+    expect(res2.status).toBe(200);
+  });
+
+  it('retries whole group on port+1 when an address hits EADDRINUSE', async () => {
+    home = await mkdtemp(join(tmpdir(), 'kimi-server-v2-multi-retry-'));
+    const { port, next } = await allocateAdjacentFreePair('127.0.0.2');
+    const occupant = await listenOnPort('127.0.0.2', port);
+    try {
+      server = await startServer({
+        hostIdentity: TEST_HOST_IDENTITY,
+        hosts: ['127.0.0.1', '127.0.0.2'],
+        port,
+        homeDir: home,
+        logLevel: 'silent',
+      });
+
+      expect(server.port).toBeGreaterThanOrEqual(next);
+      const res1 = await fetch(`http://127.0.0.1:${server.port}/api/v1/healthz`);
+      expect(res1.status).toBe(200);
+      const res2 = await fetch(`http://127.0.0.2:${server.port}/api/v1/healthz`);
+      expect(res2.status).toBe(200);
+    } finally {
+      await closeNetServer(occupant);
+    }
+  });
+
+  it('fails immediately and names the offending address when an address cannot be bound', async () => {
+    home = await mkdtemp(join(tmpdir(), 'kimi-server-v2-multi-fail-'));
+    const { port } = await allocateAdjacentFreePair('127.0.0.1');
+    await expect(
+      startServer({
+        hostIdentity: TEST_HOST_IDENTITY,
+        hosts: ['127.0.0.1', '203.0.113.7'],
+        port,
+        homeDir: home,
+        logLevel: 'silent',
+      }),
+    ).rejects.toThrow('203.0.113.7');
+
+    const probe = await listenOnPort('127.0.0.1', port).catch(() => null);
+    expect(probe).not.toBeNull();
+    if (probe !== null) {
+      await closeNetServer(probe);
     }
   });
 });

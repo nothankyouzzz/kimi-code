@@ -146,7 +146,7 @@ function startNewServerAfterExit(host: SlashCommandHost, sessionId: string): voi
           // gate.
           const token = tryResolveServerToken(getDataDir());
           const url = webSessionUrl(origin, sessionId, token);
-          process.stdout.write(formatReadyBanner(origin, options.host, { token }));
+          process.stdout.write(formatReadyBanner(origin, options.hosts, { token }));
           process.stdout.write(`\n  ${sessionLine(url)}\n`);
           openUrl(url);
         },
