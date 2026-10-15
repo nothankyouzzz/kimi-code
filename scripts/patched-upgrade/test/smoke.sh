@@ -35,6 +35,28 @@ trap cleanup EXIT
 
 echo "=== Patched-Upgrade Smoke Tests ==="
 
+# 0. `--help` is the script's own documentation and must be inert: it answers
+# with no repo, no registry and no toolchain in reach, so every override points
+# at nonsense. An unknown option fails the same way — named, and early.
+echo "0. --help documents the tunables without touching anything"
+if OUT=$(KIMI_PATCH_REPO=/nonexistent KIMI_PATCH_STATE=/nonexistent bash "$PIPELINE" --help 2>&1); then
+  if printf '%s\n' "$OUT" | grep -q "STRICT_UPSTREAM_MERGE=1" \
+    && printf '%s\n' "$OUT" | grep -q "Exit codes:"; then
+    pass "--help prints the tunables and the exit codes"
+  else
+    fail "--help printed something unexpected: $OUT"
+  fi
+else
+  fail "--help exited nonzero: $OUT"
+fi
+if OUT=$(KIMI_PATCH_REPO=/nonexistent KIMI_PATCH_STATE=/nonexistent bash "$PIPELINE" --nope 2>&1); then
+  fail "an unknown option exited zero"
+elif printf '%s\n' "$OUT" | grep -q "unknown option: --nope"; then
+  pass "an unknown option is named and rejected"
+else
+  fail "unknown-option message missing: $OUT"
+fi
+
 # 1. Clean DRY_RUN: the merge gate passes and the run stops at the DRY_RUN
 # marker. The live registry legitimately contains branches that no longer merge
 # (that is exactly what the companion skill's §3 fixes), so the fixture is built

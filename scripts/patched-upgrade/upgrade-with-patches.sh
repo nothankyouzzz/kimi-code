@@ -51,28 +51,16 @@
 # responsible patch named, instead of as an opaque rolldown error. SKIP_TYPECHECK=1
 # bypasses the gate.
 #
-# Env overrides:
-#   KIMI_PATCH_REPO   repo working tree (default: .state.repoPath from the patch registry)
-#   KIMI_PATCH_STATE  registry/state file (default ~/.kimi-code/local-patches.json)
-#   DRY_RUN=1         stop before the build step, print the plan only
-#   FORCE=1           rebuild even when state matches the target release
-#   SKIP_TYPECHECK=1  skip the pre-build type-check gate
-#   STRICT_UPSTREAM_MERGE=1  treat merge conflicts vs upstream/main as a fatal gate
-#   KIMI_PATCH_LOCAL=1  source patch branches from local branches instead of
-#                       origin, and skip the origin fetch (development/debug)
+# The tunables are environment variables; `--help` prints the full list together
+# with the exit codes, so the script documents itself without a reader having to
+# open this file. Everything is settable per run.
 set -euo pipefail
 
-STATE_FILE="${KIMI_PATCH_STATE:-$HOME/.kimi-code/local-patches.json}"
-REPO="${KIMI_PATCH_REPO:-}"
-if [ -z "$REPO" ] && [ -f "$STATE_FILE" ]; then
-  REPO=$(jq -r '.state.repoPath // empty' "$STATE_FILE" 2>/dev/null || true)
-fi
-[ -n "$REPO" ] || die "repo path not configured: set KIMI_PATCH_REPO, or re-run the patched-upgrade install.sh so it records .state.repoPath"
+EXIT_PREFLIGHT=10
+EXIT_APPLY=11
 BIN_DIR="$HOME/.kimi-code/bin"
 UPSTREAM_REPO="MoonshotAI/kimi-code"
 TAG_PREFIX="@moonshot-ai/kimi-code@"
-EXIT_PREFLIGHT=10
-EXIT_APPLY=11
 
 log() { printf '[kimi-patched-upgrade] %s\n' "$*"; }
 warn() { printf '[kimi-patched-upgrade] WARN: %s\n' "$*" >&2; }
@@ -80,6 +68,81 @@ stage() { printf '\n[kimi-patched-upgrade] ---- %s ----\n' "$*"; }
 die() { printf '[kimi-patched-upgrade] ERROR: %s\n' "$*" >&2; exit 1; }
 die_preflight() { printf '[kimi-patched-upgrade] ERROR[pre-flight]: %s\n' "$*" >&2; exit "$EXIT_PREFLIGHT"; }
 die_apply() { printf '[kimi-patched-upgrade] ERROR[apply]: %s\n' "$*" >&2; exit "$EXIT_APPLY"; }
+
+usage() {
+  cat <<'EOF'
+upgrade-with-patches.sh — rebuild kimi from an upstream release with the local
+patch branches applied, then atomically swap ~/.kimi-code/bin/kimi.
+
+Usage:
+  upgrade-with-patches.sh [options] [version]
+
+Arguments:
+  version   upstream release to build, e.g. 2.2.0. Defaults to the latest
+            GitHub release tag.
+
+Options:
+  -h, --help   print this help and exit (touches nothing, needs no network)
+
+Every tunable is an environment variable, settable per run:
+  KIMI_PATCH_REPO=<path>           repo working tree
+                                   (default: .state.repoPath from the registry)
+  KIMI_PATCH_STATE=<path>          patch registry, also holds build state
+                                   (default: ~/.kimi-code/local-patches.json)
+  KIMI_PATCH_LOCAL=1               source patch branches from the local branches
+                                   instead of origin, and skip the origin fetch
+                                   (development/debug loop)
+  DRY_RUN=1                        stop before the build step, print the plan
+  FORCE=1                          rebuild even when the recorded release and
+                                   patch fingerprint already match
+  SKIP_TYPECHECK=1                 skip the pre-build type-check gate
+  STRICT_UPSTREAM_MERGE=1          make merge conflicts vs upstream/main a fatal
+                                   pre-flight gate. Default: warn and continue,
+                                   because the build baseline is the release
+                                   tag, not upstream/main
+  KIMI_UPGRADE_STRICT_SELFCHECK=1  make hook-script / patch-registry drift fatal
+                                   (default: warn)
+
+Exit codes:
+  0    success, or nothing to do
+  1    general failure (bad argument, missing repo, build failure)
+  10   pre-flight merge gate failed (only with STRICT_UPSTREAM_MERGE=1)
+  11   applying the patches onto the release tag failed
+
+Registry statuses: only `active` entries are applied. The pipeline marks an
+entry `merged` once its PR merges; `parked` is the manual equivalent for an
+entry you deliberately keep out of the build. Anything but `active` is skipped.
+
+Installed as ~/.kimi-code/upgrade-with-patches.sh by install.sh; the source of
+truth is scripts/patched-upgrade/ on local/upgrade-hook (see README.md there).
+`kimi upgrade` runs this script and forwards its own flags as the variables above.
+EOF
+}
+
+# Arguments: `--help` must work before anything else does — it exits before the
+# registry, the repo and the toolchain are even looked at.
+TARGET_VERSION=""
+for arg in "$@"; do
+  case "$arg" in
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  -*)
+    die "unknown option: $arg (try --help)"
+    ;;
+  *)
+    TARGET_VERSION="$arg"
+    ;;
+  esac
+done
+
+STATE_FILE="${KIMI_PATCH_STATE:-$HOME/.kimi-code/local-patches.json}"
+REPO="${KIMI_PATCH_REPO:-}"
+if [ -z "$REPO" ] && [ -f "$STATE_FILE" ]; then
+  REPO=$(jq -r '.state.repoPath // empty' "$STATE_FILE" 2>/dev/null || true)
+fi
+[ -n "$REPO" ] || die "repo path not configured: set KIMI_PATCH_REPO, or re-run the patched-upgrade install.sh so it records .state.repoPath"
 
 # Resolve a patch branch to the ref the pipeline reads. Origin is
 # authoritative: a branch that changed on the remote was rebased onto the
@@ -344,8 +407,8 @@ else
 fi
 
 # --- 1. resolve target version ---------------------------------------------
+# TARGET_VERSION already carries the positional argument, if one was given.
 stage "resolve target release"
-TARGET_VERSION="${1:-}"
 if [ -z "$TARGET_VERSION" ]; then
   TARGET_VERSION=$(HTTPS_PROXY= HTTP_PROXY= https_proxy= http_proxy= \
     gh release view -R "$UPSTREAM_REPO" --json tagName -q '.tagName' | sed "s|^${TAG_PREFIX}||")

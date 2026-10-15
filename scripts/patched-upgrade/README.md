@@ -120,5 +120,9 @@ kimi upgrade                           # rebuilds the patched binary
   `STRICT_UPSTREAM_MERGE=1` restores fatal merge-conflict checks vs upstream/main;
   `DRY_RUN=1` prints the plan without building; `FORCE=1` rebuilds anyway;
   `SKIP_TYPECHECK=1` bypasses the pre-build type-check gate.
+- The script answers `-h` / `--help` itself: the tunables, the exit codes
+  (`0` ok, `1` failed, `10` pre-flight merge gate, `11` patch application) and
+  the registry statuses, without a reader needing to open the file. It exits
+  before it looks at the registry, the repo or the toolchain.
 - The script fails fast when `node --version` does not match `.nvmrc` — the
   SEA build needs the repo-pinned Node, not an arbitrary system Node.
