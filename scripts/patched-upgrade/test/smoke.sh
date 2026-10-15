@@ -123,7 +123,10 @@ chmod +x "$TMP_DIR/.kimi-code/upgrade-with-patches.sh"
 git -C "$REPO_DIR" show "$SELF_SRC_REF:scripts/patched-upgrade/skills/resolve-upgrade-conflicts/SKILL.md" > "$TMP_DIR/.kimi-code/skills/resolve-upgrade-conflicts/SKILL.md"
 
 OUT=$(HOME="$TMP_DIR" KIMI_PATCH_REPO="$REPO_DIR" KIMI_PATCH_STATE="$TMP_REGISTRY" DRY_RUN=1 bash "$PIPELINE" 2>&1 || true)
-if printf '%s\n' "$OUT" | grep -q "only-in-repo: fix/wsl-clipboard-bmp"; then
+# The deleted branch must be named, not the whole list: the live registry
+# legitimately lags the bundled one, so what else is only-in-repo depends on the
+# machine's install state and is not this test's subject.
+if printf '%s\n' "$OUT" | grep -qE "only-in-repo: .*\bfix/wsl-clipboard-bmp\b"; then
   pass "registry drift warns under default mode"
 else
   fail "registry drift did not warn: $OUT"
