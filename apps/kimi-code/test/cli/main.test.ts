@@ -3,6 +3,7 @@ import { ErrorCodes, KimiError } from '@moonshot-ai/kimi-code-sdk';
 
 import { validateOptions } from '#/cli/options';
 import type { CLIOptions } from '#/cli/options';
+import type { UpgradeCommandOptions } from '#/cli/commands';
 import type * as OptionsModule from '#/cli/options';
 import { runPrompt } from '#/cli/run-prompt';
 import { runShell } from '#/cli/run-shell';
@@ -205,12 +206,12 @@ async function runHandleMainCommand(opts: CLIOptions): Promise<number | null> {
   }
 }
 
-async function runHandleUpgradeCommand(yes = false): Promise<number> {
+async function runHandleUpgradeCommand(options: Partial<UpgradeCommandOptions> = {}): Promise<number> {
   const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code?: string | number | null) => {
     throw new ExitCalled(Number(code ?? 0));
   });
   try {
-    await handleUpgradeCommand('0.0.1-alpha.2', yes);
+    await handleUpgradeCommand('0.0.1-alpha.2', { yes: false, ...options });
     throw new Error('expected process.exit');
   } catch (error) {
     if (error instanceof ExitCalled) {
@@ -465,9 +466,22 @@ describe('main entry command handling', () => {
       track: mocks.track,
       logger: mocks.log,
       yes: false,
+      localUpgrade: {},
     });
     expect(mocks.shutdownTelemetry).toHaveBeenCalledWith({ timeoutMs: 3000 });
     expect(mocks.harness.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('forwards the patched-upgrade flags to handleUpgrade', async () => {
+    const exitCode = await runHandleUpgradeCommand({ dryRun: true, version: '2.2.0' });
+
+    expect(exitCode).toBe(0);
+    expect(mocks.handleUpgrade).toHaveBeenCalledWith('0.0.1-alpha.2', {
+      track: mocks.track,
+      logger: mocks.log,
+      yes: false,
+      localUpgrade: { dryRun: true, version: '2.2.0' },
+    });
   });
 
   it('formats Kimi startup errors with structured fields', () => {

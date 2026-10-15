@@ -5,7 +5,10 @@ import { track as trackTelemetry, type TelemetryProperties } from '@moonshot-ai/
 
 import { INTERACTIVE_UPDATE_CHECK_TIMEOUT_MS } from '#/constant/app';
 
-import { resolveLocalUpgradePipeline } from '#/cli/update/local-pipeline';
+import {
+  resolveLocalUpgradePipeline,
+  type LocalUpgradeOptions,
+} from '#/cli/update/local-pipeline';
 import { refreshUpdateCache } from '#/cli/update/refresh';
 import { selectUpdateTarget } from '#/cli/update/select';
 import { detectInstallSource } from '#/cli/update/source';
@@ -34,6 +37,17 @@ interface WritableLike {
 type UpgradeTrack = (event: string, properties?: TelemetryProperties) => void;
 type UpgradeLogger = Pick<Logger, 'info' | 'warn'>;
 
+// LOCAL-ONLY PATCH — never upstream. The flags registered on `kimi upgrade` in
+// `cli/commands.ts` and the environment variable the pipeline script reads for
+// each. `version` is handled separately: it is the script's positional argument.
+const LOCAL_UPGRADE_ENV_VARS: ReadonlyArray<readonly [keyof LocalUpgradeOptions, string]> = [
+  ['dryRun', 'DRY_RUN'],
+  ['force', 'FORCE'],
+  ['local', 'KIMI_PATCH_LOCAL'],
+  ['strictUpstreamMerge', 'STRICT_UPSTREAM_MERGE'],
+  ['skipTypecheck', 'SKIP_TYPECHECK'],
+];
+
 export interface UpgradeDeps {
   readonly refreshUpdateCache: () => Promise<UpdateCache>;
   readonly detectInstallSource: () => Promise<InstallSource>;
@@ -50,6 +64,7 @@ export interface UpgradeDeps {
   readonly stderr: WritableLike;
   readonly isInteractive: boolean;
   readonly yes: boolean;
+  readonly localUpgrade: LocalUpgradeOptions;
   readonly track: UpgradeTrack;
   readonly logger: UpgradeLogger;
 }
@@ -85,13 +100,20 @@ export async function handleUpgrade(
   // patches. When the external pipeline script exists, delegate the upgrade
   // decision to it: it checks the upstream release, the local patch registry,
   // and the installed binary, then rebuilds and swaps only when necessary.
-  // Pass the target release version if one is available, otherwise the current
-  // version so the script can still re-apply/rebuild changed patches for the
-  // same release. Absent the script, fall through to the stock behavior.
+  // `--version` names the release to build; otherwise the target release if one
+  // is available, else the current version, so the script can still
+  // re-apply/rebuild changed patches for the same release. Every other flag is
+  // forwarded as the environment variable the script already reads; the names
+  // pair with the options registered in `cli/commands.ts`. Absent the script,
+  // fall through to the stock behavior.
   const localUpgradePipeline = resolveLocalUpgradePipeline();
   if (localUpgradePipeline !== null) {
-    const versionToPass = target?.version ?? currentVersion;
-    const result = spawnSync(localUpgradePipeline, [versionToPass], { stdio: 'inherit' });
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    for (const [key, name] of LOCAL_UPGRADE_ENV_VARS) {
+      if (deps.localUpgrade[key] === true) env[name] = '1';
+    }
+    const versionToPass = deps.localUpgrade.version ?? target?.version ?? currentVersion;
+    const result = spawnSync(localUpgradePipeline, [versionToPass], { stdio: 'inherit', env });
     return result.status ?? 1;
   }
 
@@ -209,6 +231,7 @@ function createDefaultUpgradeDeps(overrides: Partial<UpgradeDeps>): UpgradeDeps 
     stderr: overrides.stderr ?? process.stderr,
     isInteractive: overrides.isInteractive ?? (process.stdin.isTTY && process.stdout.isTTY),
     yes: overrides.yes ?? false,
+    localUpgrade: overrides.localUpgrade ?? {},
     track: overrides.track ?? trackTelemetry,
     logger: overrides.logger ?? log,
   };

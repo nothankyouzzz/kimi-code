@@ -5,9 +5,9 @@
  * Run: pnpm -C apps/kimi-code exec vitest run test/cli/options.test.ts
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createProgram } from '#/cli/commands';
+import { createProgram, type UpgradeCommandOptions } from '#/cli/commands';
 import type { CLIOptions } from '#/cli/options';
 import { OptionConflictError, OUTPUT_FORMAT_ENV, resolveOutputFormat, validateOptions } from '#/cli/options';
 
@@ -34,6 +34,25 @@ function parse(argv: string[]): CLIOptions {
     throw new Error('Main action handler was not called');
   }
   return captured;
+}
+
+// helpInformation() omits the text registered with addHelpText() — those are
+// events emitted by outputHelp(), which is the path `kimi upgrade --help`
+// actually takes. Render through that so the assertion sees what a user sees.
+function upgradeHelp(program: ReturnType<typeof createProgram>): string {
+  const command = program.commands.find((candidate) => candidate.name() === 'upgrade');
+  if (command === undefined) {
+    throw new Error("command 'upgrade' is not registered");
+  }
+  const output: string[] = [];
+  command.configureOutput({
+    writeOut: (chunk: string) => {
+      output.push(chunk);
+    },
+    writeErr: () => {},
+  });
+  command.outputHelp();
+  return output.join('');
 }
 
 describe('CLI options parsing', () => {
@@ -523,8 +542,19 @@ describe('CLI options parsing', () => {
   });
 
   describe('sub-commands', () => {
+    // The upgrade command exposes the patched-upgrade pipeline's flags only when
+    // that pipeline is installed; pin it absent so these assertions describe one
+    // machine-independent binary.
+    beforeEach(() => {
+      vi.stubEnv('KIMI_LOCAL_UPGRADE_SCRIPT', '/nonexistent/kimi-upgrade-test-pipeline');
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
     it('routes upgrade without calling the main action', () => {
-      const upgradeYes: boolean[] = [];
+      const upgradeOptions: UpgradeCommandOptions[] = [];
       const program = createProgram(
         '0.0.0',
         () => {
@@ -532,8 +562,8 @@ describe('CLI options parsing', () => {
         },
         () => {},
         () => {},
-        (yes) => {
-          upgradeYes.push(yes);
+        (options) => {
+          upgradeOptions.push(options);
         },
       );
       program.exitOverride();
@@ -544,11 +574,11 @@ describe('CLI options parsing', () => {
 
       program.parse(['node', 'kimi', 'upgrade']);
 
-      expect(upgradeYes).toEqual([false]);
+      expect(upgradeOptions).toEqual([{ yes: false }]);
     });
 
     it('routes update alias to the upgrade handler', () => {
-      const upgradeYes: boolean[] = [];
+      const upgradeOptions: UpgradeCommandOptions[] = [];
       const program = createProgram(
         '0.0.0',
         () => {
@@ -556,8 +586,8 @@ describe('CLI options parsing', () => {
         },
         () => {},
         () => {},
-        (yes) => {
-          upgradeYes.push(yes);
+        (options) => {
+          upgradeOptions.push(options);
         },
       );
       program.exitOverride();
@@ -568,7 +598,34 @@ describe('CLI options parsing', () => {
 
       program.parse(['node', 'kimi', 'update', '-y']);
 
-      expect(upgradeYes).toEqual([true]);
+      expect(upgradeOptions).toEqual([{ yes: true }]);
+    });
+
+    it('documents the patched-upgrade pipeline on the upgrade command', () => {
+      vi.stubEnv('KIMI_LOCAL_UPGRADE_SCRIPT', process.execPath);
+      const program = createProgram(
+        '0.0.0',
+        () => {},
+        () => {},
+      );
+      const help = upgradeHelp(program);
+
+      expect(help).toContain('--dry-run');
+      expect(help).toContain('--strict-upstream-merge');
+      expect(help).toContain('DRY_RUN=1');
+      expect(help).toContain(process.execPath);
+    });
+
+    it('leaves the pipeline flags off a binary without one', () => {
+      const program = createProgram(
+        '0.0.0',
+        () => {},
+        () => {},
+      );
+      const help = upgradeHelp(program);
+
+      expect(help).not.toContain('--dry-run');
+      expect(help).not.toContain('DRY_RUN=1');
     });
 
     it('registers the visible sub-commands', () => {

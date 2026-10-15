@@ -22,7 +22,7 @@ import {
   withTelemetryContext,
 } from '@moonshot-ai/kimi-telemetry';
 
-import { createProgram } from './cli/commands';
+import { createProgram, type UpgradeCommandOptions } from './cli/commands';
 import { finalizeHeadlessRun } from './cli/headless-exit';
 import { startupTrace } from './utils/startup-trace';
 import type { CLIOptions } from './cli/options';
@@ -114,7 +114,10 @@ async function handleMigrateCommand(
   await runShell(MIGRATE_CLI_OPTIONS, version, { migrateOnly: true });
 }
 
-export async function handleUpgradeCommand(version: string, yes: boolean): Promise<void> {
+export async function handleUpgradeCommand(
+  version: string,
+  options: UpgradeCommandOptions,
+): Promise<void> {
   const telemetryBootstrap = createCliTelemetryBootstrap();
   const telemetryClient: TelemetryClient = {
     track,
@@ -137,7 +140,8 @@ export async function handleUpgradeCommand(version: string, yes: boolean): Promi
       version,
       uiMode: CLI_UI_MODE,
     });
-    exitCode = await handleUpgrade(version, { track, logger: log, yes });
+    const { yes, ...localUpgrade } = options;
+    exitCode = await handleUpgrade(version, { track, logger: log, yes, localUpgrade });
   } finally {
     await shutdownTelemetry({ timeoutMs: CLI_SHUTDOWN_TIMEOUT_MS }).catch(() => {});
     await harness.close().catch(() => {});
@@ -275,8 +279,8 @@ function bootstrap(): void {
         process.exit(1);
       });
     },
-    (yes) => {
-      void handleUpgradeCommand(version, yes).catch(async (error: unknown) => {
+    (options) => {
+      void handleUpgradeCommand(version, options).catch(async (error: unknown) => {
         await logStartupFailure('upgrade', error);
         process.stderr.write(formatStartupError(error, { operation: 'upgrade' }));
         process.stderr.write(`See log: ${resolveGlobalLogPath(resolveKimiHome())}\n`);

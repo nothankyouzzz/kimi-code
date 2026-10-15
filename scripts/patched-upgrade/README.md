@@ -124,5 +124,13 @@ kimi upgrade                           # rebuilds the patched binary
   (`0` ok, `1` failed, `10` pre-flight merge gate, `11` patch application) and
   the registry statuses, without a reader needing to open the file. It exits
   before it looks at the registry, the repo or the toolchain.
+- The patched binary exposes the same tunables as flags on `kimi upgrade`
+  (`--version <release>`, `--dry-run`, `--force`, `--local`,
+  `--strict-upstream-merge`, `--skip-typecheck`) and appends the environment
+  list to `kimi upgrade --help`. `--version` is the script's positional
+  argument; the rest are forwarded as the variables above, so the script needs
+  no flag parsing of its own. The flags are registered only while the script is
+  installed — a binary without a pipeline keeps upstream's `-y/--yes` and
+  nothing else.
 - The script fails fast when `node --version` does not match `.nvmrc` — the
   SEA build needs the repo-pinned Node, not an arbitrary system Node.

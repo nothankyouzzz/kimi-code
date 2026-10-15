@@ -1,3 +1,4 @@
+import { formatLocalUpgradeHelp, resolveLocalUpgradePipeline, type LocalUpgradeOptions } from '#/cli/update/local-pipeline';
 import { CLI_COMMAND_NAME } from '#/constant/app';
 import { registerMigrateCommand, type MigrateCommandOptions } from '#/migration/index';
 import { Command, InvalidArgumentError, Option } from 'commander';
@@ -18,7 +19,10 @@ import { registerWebCommand } from './sub/web';
 export type MainCommandHandler = (opts: CLIOptions) => void;
 export type MigrateCommandHandler = (options: MigrateCommandOptions) => void;
 export type PluginNodeRunnerHandler = (entry: string, args: readonly string[]) => void;
-export type UpgradeCommandHandler = (yes: boolean) => void | Promise<void>;
+export interface UpgradeCommandOptions extends LocalUpgradeOptions {
+  yes: boolean;
+}
+export type UpgradeCommandHandler = (options: UpgradeCommandOptions) => void | Promise<void>;
 export type UpdateDownloadHandler = (version: string, manual: boolean) => void;
 
 export function createProgram(
@@ -132,14 +136,35 @@ export function createProgram(
   registerInstallDesktopCommand(program);
   registerAppCommand(program);
   registerMigrateCommand(program, onMigrate);
-  program
+  // LOCAL-ONLY PATCH — never upstream. On a patched binary `kimi upgrade` runs
+  // the external pipeline, never the stock installer, so the pipeline's
+  // tunables have to live in this command's help: without them `kimi upgrade
+  // --help` documents a code path this binary never takes. Registered only
+  // when a pipeline is actually installed — a stock binary gains no flags it
+  // would ignore.
+  const localUpgradePipeline = resolveLocalUpgradePipeline();
+  const upgradeCommand = program
     .command('upgrade')
     .alias('update')
     .description('Upgrade Kimi Code to the latest version.')
-    .option('-y, --yes', 'Skip the confirmation prompt and install the update directly.', false)
-    .action(async (options: { yes?: boolean }) => {
-      await onUpgrade(options.yes === true);
-    });
+    .option('-y, --yes', 'Skip the confirmation prompt and install the update directly.', false);
+  if (localUpgradePipeline !== null) {
+    upgradeCommand
+      .option('--version <version>', 'Build this upstream release instead of the latest one.')
+      .option('--dry-run', 'Print what the patched rebuild would do, without building.', false)
+      .option('--force', 'Rebuild even when the release and the patch fingerprint match.', false)
+      .option('--local', 'Build from the local patch branches instead of origin.', false)
+      .option(
+        '--strict-upstream-merge',
+        'Treat merge conflicts against upstream/main as a fatal gate.',
+        false,
+      )
+      .option('--skip-typecheck', 'Skip the pre-build type-check gate.', false)
+      .addHelpText('after', formatLocalUpgradeHelp(localUpgradePipeline));
+  }
+  upgradeCommand.action(async (options: UpgradeCommandOptions) => {
+    await onUpgrade(options);
+  });
 
   program
     .command('__plugin_run_node', { hidden: true })

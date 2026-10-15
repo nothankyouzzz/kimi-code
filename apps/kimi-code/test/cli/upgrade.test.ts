@@ -4,6 +4,16 @@ import { handleUpgrade } from '#/cli/sub/upgrade';
 import type { InstallPromptChoiceValue } from '#/cli/update/prompt';
 import type { InstallSource, UpdateCache } from '#/cli/update/types';
 
+// handleUpgrade delegates to the local patched-upgrade pipeline whenever that
+// script is installed; these tests stub the path to a real file to reach that
+// branch, and intercept the spawn so no pipeline ever runs.
+const spawnSyncMock = vi.hoisted(() => vi.fn());
+
+vi.mock('node:child_process', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:child_process')>()),
+  spawnSync: spawnSyncMock,
+}));
+
 function cacheWith(
   version: string | null,
   manifest: UpdateCache['manifest'] = null,
@@ -254,5 +264,70 @@ describe('handleUpgrade', () => {
 
     expect(deps.installUpdate).toHaveBeenCalledWith('npm-global', '0.5.0', 'darwin');
     expect(stdout.join('')).toContain('Updated @moonshot-ai/kimi-code to 0.5.0');
+  });
+});
+
+describe('handleUpgrade with the local patched-upgrade pipeline', () => {
+  beforeEach(() => {
+    spawnSyncMock.mockReset();
+    spawnSyncMock.mockReturnValue({ status: 0 });
+    // Resolution only checks that the path exists; any real file stands in for
+    // the pipeline script, and the spawn itself is mocked below it.
+    vi.stubEnv('KIMI_LOCAL_UPGRADE_SCRIPT', process.execPath);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('builds the requested release and forwards the flags as the script environment', async () => {
+    const { writable } = captureOutput();
+    const deps = createDeps({ latest: '0.5.0' });
+
+    await expect(
+      handleUpgrade('0.4.0', {
+        ...deps,
+        ...writable,
+        localUpgrade: {
+          version: '2.2.0',
+          dryRun: true,
+          force: true,
+          local: true,
+          strictUpstreamMerge: true,
+          skipTypecheck: true,
+        },
+      }),
+    ).resolves.toBe(0);
+
+    expect(spawnSyncMock).toHaveBeenCalledWith(process.execPath, ['2.2.0'], {
+      stdio: 'inherit',
+      env: expect.objectContaining({
+        DRY_RUN: '1',
+        FORCE: '1',
+        KIMI_PATCH_LOCAL: '1',
+        STRICT_UPSTREAM_MERGE: '1',
+        SKIP_TYPECHECK: '1',
+      }),
+    });
+  });
+
+  it('passes the available update as the target and sets no flag variables', async () => {
+    const { writable } = captureOutput();
+    const deps = createDeps({ latest: '0.5.0' });
+
+    await expect(handleUpgrade('0.4.0', { ...deps, ...writable })).resolves.toBe(0);
+
+    expect(spawnSyncMock).toHaveBeenCalledWith(process.execPath, ['0.5.0'], {
+      stdio: 'inherit',
+      env: expect.not.objectContaining({ DRY_RUN: expect.anything() }),
+    });
+  });
+
+  it('reports the script exit status, including a failed patch application', async () => {
+    spawnSyncMock.mockReturnValue({ status: 11 });
+    const { writable } = captureOutput();
+    const deps = createDeps({ latest: '0.5.0' });
+
+    await expect(handleUpgrade('0.4.0', { ...deps, ...writable })).resolves.toBe(11);
   });
 });
